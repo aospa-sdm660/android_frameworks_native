@@ -182,6 +182,27 @@ void RpcState::terminate() {
     }
 }
 
+RpcState::CommandData::CommandData(size_t size) : mSize(size) {
+    // The maximum size for regular binder is 1MB for all concurrent
+    // transactions. A very small proportion of transactions are even
+    // larger than a page, but we need to avoid allocating too much
+    // data on behalf of an arbitrary client, or we could risk being in
+    // a position where a single additional allocation could run out of
+    // memory.
+    //
+    // Note, this limit may not reflect the total amount of data allocated for a
+    // transaction (in some cases, additional fixed size amounts are added),
+    // though for rough consistency, we should avoid cases where this data type
+    // is used for multiple dynamic allocations for a single transaction.
+    constexpr size_t kMaxTransactionAllocation = 100 * 1000;
+    if (size == 0) return;
+    if (size > kMaxTransactionAllocation) {
+        ALOGW("Transaction requested too much data allocation %zu", size);
+        return;
+    }
+    mData.reset(new (std::nothrow) uint8_t[size]);
+}
+
 bool RpcState::rpcSend(const base::unique_fd& fd, const char* what, const void* data, size_t size) {
     LOG_RPC_DETAIL("Sending %s on fd %d: %s", what, fd.get(), hexString(data, size).c_str());
 
@@ -326,7 +347,11 @@ status_t RpcState::transact(const base::unique_fd& fd, const RpcAddress& address
             .asyncNumber = asyncNumber,
     };
 
-    std::vector<uint8_t> transactionData(sizeof(RpcWireTransaction) + data.dataSize());
+    CommandData transactionData(sizeof(RpcWireTransaction) + data.dataSize());
+    if (!transactionData.valid()) {
+        return NO_MEMORY;
+    }
+
     memcpy(transactionData.data() + 0, &transaction, sizeof(RpcWireTransaction));
     memcpy(transactionData.data() + sizeof(RpcWireTransaction), data.data(), data.dataSize());
 
@@ -379,9 +404,12 @@ status_t RpcState::waitForReply(const base::unique_fd& fd, const sp<RpcSession>&
         if (status != OK) return status;
     }
 
-    uint8_t* data = new uint8_t[command.bodySize];
+    CommandData data(command.bodySize);
+    if (!data.valid()) {
+        return NO_MEMORY;
+    }
 
-    if (!rpcRec(fd, "reply body", data, command.bodySize)) {
+    if (!rpcRec(fd, "reply body", data.data(), command.bodySize)) {
         return DEAD_OBJECT;
     }
 
@@ -391,9 +419,10 @@ status_t RpcState::waitForReply(const base::unique_fd& fd, const sp<RpcSession>&
         terminate();
         return BAD_VALUE;
     }
-    RpcWireReply* rpcReply = reinterpret_cast<RpcWireReply*>(data);
+    RpcWireReply* rpcReply = reinterpret_cast<RpcWireReply*>(data.data());
     if (rpcReply->status != OK) return rpcReply->status;
 
+    data.release();
     reply->ipcSetDataReference(rpcReply->data, command.bodySize - offsetof(RpcWireReply, data),
                                nullptr, 0, cleanup_reply_data);
 
@@ -461,7 +490,10 @@ status_t RpcState::processTransact(const base::unique_fd& fd, const sp<RpcSessio
                                    const RpcWireHeader& command) {
     LOG_ALWAYS_FATAL_IF(command.command != RPC_COMMAND_TRANSACT, "command: %d", command.command);
 
-    std::vector<uint8_t> transactionData(command.bodySize);
+    CommandData transactionData(command.bodySize);
+    if (!transactionData.valid()) {
+        return NO_MEMORY;
+    }
     if (!rpcRec(fd, "transaction body", transactionData.data(), transactionData.size())) {
         return DEAD_OBJECT;
     }
@@ -479,7 +511,7 @@ static void do_nothing_to_transact_data(Parcel* p, const uint8_t* data, size_t d
 }
 
 status_t RpcState::processTransactInternal(const base::unique_fd& fd, const sp<RpcSession>& session,
-                                           std::vector<uint8_t>&& transactionData) {
+                                           CommandData transactionData) {
     if (transactionData.size() < sizeof(RpcWireTransaction)) {
         ALOGE("Expecting %zu but got %zu bytes for RpcWireTransaction. Terminating!",
               sizeof(RpcWireTransaction), transactionData.size());
@@ -500,7 +532,6 @@ status_t RpcState::processTransactInternal(const base::unique_fd& fd, const sp<R
         auto it = mNodeForAddress.find(addr);
         if (it == mNodeForAddress.end()) {
             ALOGE("Unknown binder address %s.", addr.toString().c_str());
-            dump();
             replyStatus = BAD_VALUE;
         } else {
             target = it->second.binder.promote();
@@ -630,7 +661,7 @@ status_t RpcState::processTransactInternal(const base::unique_fd& fd, const sp<R
                 // justification for const_cast (consider avoiding priority_queue):
                 // - AsyncTodo operator< doesn't depend on 'data' object
                 // - gotta go fast
-                std::vector<uint8_t> data = std::move(
+                CommandData data = std::move(
                         const_cast<BinderNode::AsyncTodo&>(it->second.asyncTodo.top()).data);
                 it->second.asyncTodo.pop();
                 _l.unlock();
@@ -644,7 +675,10 @@ status_t RpcState::processTransactInternal(const base::unique_fd& fd, const sp<R
             .status = replyStatus,
     };
 
-    std::vector<uint8_t> replyData(sizeof(RpcWireReply) + reply.dataSize());
+    CommandData replyData(sizeof(RpcWireReply) + reply.dataSize());
+    if (!replyData.valid()) {
+        return NO_MEMORY;
+    }
     memcpy(replyData.data() + 0, &rpcReply, sizeof(RpcWireReply));
     memcpy(replyData.data() + sizeof(RpcWireReply), reply.data(), reply.dataSize());
 
@@ -671,7 +705,10 @@ status_t RpcState::processTransactInternal(const base::unique_fd& fd, const sp<R
 status_t RpcState::processDecStrong(const base::unique_fd& fd, const RpcWireHeader& command) {
     LOG_ALWAYS_FATAL_IF(command.command != RPC_COMMAND_DEC_STRONG, "command: %d", command.command);
 
-    std::vector<uint8_t> commandData(command.bodySize);
+    CommandData commandData(command.bodySize);
+    if (!commandData.valid()) {
+        return NO_MEMORY;
+    }
     if (!rpcRec(fd, "dec ref body", commandData.data(), commandData.size())) {
         return DEAD_OBJECT;
     }
@@ -690,7 +727,6 @@ status_t RpcState::processDecStrong(const base::unique_fd& fd, const RpcWireHead
     auto it = mNodeForAddress.find(addr);
     if (it == mNodeForAddress.end()) {
         ALOGE("Unknown binder address %s for dec strong.", addr.toString().c_str());
-        dump();
         return OK;
     }
 

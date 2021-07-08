@@ -813,6 +813,7 @@ public:
     status_t getProtectedContentSupport(bool* /*outSupported*/) const override { return NO_ERROR; }
 
     status_t isWideColorDisplay(const sp<IBinder>&, bool*) const override { return NO_ERROR; }
+    status_t isDeviceRCSupported(const sp<IBinder>&, bool*) const override { return NO_ERROR; }
     status_t getDisplayBrightnessSupport(const sp<IBinder>& /*displayToken*/,
                                          bool* /*outSupport*/) const override {
         return NO_ERROR;
@@ -845,6 +846,16 @@ public:
         return NO_ERROR;
     }
     status_t removeFpsListener(const sp<gui::IFpsListener>& /*listener*/) { return NO_ERROR; }
+
+    status_t addTunnelModeEnabledListener(const sp<gui::ITunnelModeEnabledListener>& /*listener*/) {
+        return NO_ERROR;
+    }
+
+    status_t removeTunnelModeEnabledListener(
+            const sp<gui::ITunnelModeEnabledListener>& /*listener*/) {
+        return NO_ERROR;
+    }
+
     status_t setDesiredDisplayModeSpecs(const sp<IBinder>& /*displayToken*/,
                                         ui::DisplayModeId /*defaultMode*/,
                                         bool /*allowGroupSwitching*/,

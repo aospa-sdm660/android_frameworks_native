@@ -105,16 +105,12 @@ class LayerExtnIntf;
 
 using composer::LayerExtnIntf;
 
-namespace composer {
-class FrameExtnIntf;
-}
-using composer::FrameExtnIntf;
-
 namespace android {
 
 class Client;
 class EventThread;
 class FpsReporter;
+class TunnelModeEnabledReporter;
 class HdrLayerInfoReporter;
 class HWComposer;
 struct SetInputWindowsListener;
@@ -199,6 +195,23 @@ struct SurfaceFlingerBE {
     // use to differentiate callbacks from different hardware composer
     // instances. Each hardware composer instance gets a different sequence id.
     int32_t mComposerSequenceId = 0;
+};
+
+class DolphinWrapper {
+public:
+    DolphinWrapper() { init(); }
+    ~DolphinWrapper();
+    bool init();
+
+    bool (*dolphinInit)() = nullptr;
+    void (*dolphinSetVsyncPeriod)(nsecs_t vsyncPeriod) = nullptr;
+    void (*dolphinTrackBufferIncrement)(const char* name, int counter) = nullptr;
+    void (*dolphinTrackBufferDecrement)(const char* name, int counter) = nullptr;
+    void (*dolphinTrackVsyncSignal)(nsecs_t vsyncTime, nsecs_t targetWakeupTime,
+                                 nsecs_t readyTime) = nullptr;
+
+private:
+    void *mDolphinHandle = nullptr;
 };
 
 class SmomoWrapper {
@@ -344,6 +357,10 @@ public:
 
     static constexpr SkipInitializationTag SkipInitialization;
 
+    // Whether or not SDR layers should be dimmed to the desired SDR white point instead of
+    // being treated as native display brightness
+    static bool enableSdrDimming;
+
     // must be called before clients can connect
     void init() ANDROID_API;
 
@@ -371,6 +388,11 @@ public:
 
     // utility function to delete a texture on the main thread
     void deleteTextureAsync(uint32_t texture);
+
+    // enable/disable h/w composer event
+    // TODO: this should be made accessible only to EventThread
+    // main thread function to enable/disable h/w composer event
+    void setVsyncEnabledInternal(bool enabled);
 
     // called on the main thread by MessageQueue when an internal message
     // is received
@@ -431,6 +453,7 @@ private:
     friend class BufferStateLayer;
     friend class Client;
     friend class FpsReporter;
+    friend class TunnelModeEnabledReporter;
     friend class Layer;
     friend class MonitoredProducer;
     friend class RefreshRateOverlay;
@@ -498,6 +521,11 @@ private:
             auto it = mCounterByLayerHandle.find(layerHandle);
             if (it != mCounterByLayerHandle.end()) {
                 auto [name, pendingBuffers] = it->second;
+                if (mDolphinWrapper.dolphinTrackBufferIncrement) {
+                    mLock.unlock();
+                    mDolphinWrapper.dolphinTrackBufferIncrement(name.c_str(),
+                        (*pendingBuffers) + 1);
+                }
                 int32_t count = ++(*pendingBuffers);
                 ATRACE_INT(name.c_str(), count);
             } else {
@@ -519,6 +547,7 @@ private:
         std::mutex mLock;
         std::unordered_map<BBinder*, std::pair<std::string, std::atomic<int32_t>*>>
                 mCounterByLayerHandle GUARDED_BY(mLock);
+        DolphinWrapper mDolphinWrapper;
     };
 
     struct ActiveModeInfo {
@@ -740,11 +769,17 @@ private:
     status_t getProtectedContentSupport(bool* outSupported) const override;
     status_t isWideColorDisplay(const sp<IBinder>& displayToken,
                                 bool* outIsWideColorDisplay) const override;
+    status_t isDeviceRCSupported(const sp<IBinder>& displayToken,
+                                 bool* outDeviceRCSupported) const override;
     status_t addRegionSamplingListener(const Rect& samplingArea, const sp<IBinder>& stopLayerHandle,
                                        const sp<IRegionSamplingListener>& listener) override;
     status_t removeRegionSamplingListener(const sp<IRegionSamplingListener>& listener) override;
     status_t addFpsListener(int32_t taskId, const sp<gui::IFpsListener>& listener) override;
     status_t removeFpsListener(const sp<gui::IFpsListener>& listener) override;
+    status_t addTunnelModeEnabledListener(
+            const sp<gui::ITunnelModeEnabledListener>& listener) override;
+    status_t removeTunnelModeEnabledListener(
+            const sp<gui::ITunnelModeEnabledListener>& listener) override;
     status_t setDesiredDisplayModeSpecs(const sp<IBinder>& displayToken,
                                         ui::DisplayModeId displayModeId, bool allowGroupSwitching,
                                         float primaryRefreshRateMin, float primaryRefreshRateMax,
@@ -772,6 +807,7 @@ private:
                           int8_t compatibility, int8_t changeFrameRateStrategy) override;
     status_t acquireFrameRateFlexibilityToken(sp<IBinder>* outToken) override;
     status_t setDisplayElapseTime(const sp<DisplayDevice>& display) const;
+    status_t isSupportedConfigSwitch(const sp<IBinder>& displayToken, int config);
 
     status_t setFrameTimelineInfo(const sp<IGraphicBufferProducer>& surface,
                                   const FrameTimelineInfo& frameTimelineInfo) override;
@@ -871,6 +907,8 @@ private:
     // the Composer HAL for presentation
     void onMessageRefresh();
 
+    // Check if unified draw supported
+    void startUnifiedDraw();
     void beginDraw(const sp<DisplayDevice>& displayDevice);
     void endDraw();
 
@@ -994,8 +1032,8 @@ private:
                                  const sp<IScreenCaptureListener>&);
     status_t renderScreenImplLocked(const RenderArea&, TraverseLayersFunction,
                                     const std::shared_ptr<renderengine::ExternalTexture>&,
-                                    bool forSystem, bool regionSampling, bool grayscale,
-                                    ScreenCaptureResults&);
+                                    bool canCaptureBlackoutContent, bool regionSampling,
+                                    bool grayscale, ScreenCaptureResults&);
 
     sp<DisplayDevice> getDisplayByIdOrLayerStack(uint64_t displayOrLayerStack) REQUIRES(mStateLock);
     sp<DisplayDevice> getDisplayById(DisplayId displayId) const REQUIRES(mStateLock);
@@ -1289,10 +1327,11 @@ private:
     sp<StartPropertySetThread> mStartPropertySetThread;
     surfaceflinger::Factory& mFactory;
 
+    std::future<void> mRenderEnginePrimeCacheFuture;
+
     // access must be protected by mStateLock
     mutable Mutex mStateLock;
     mutable Mutex mVsyncLock;
-    mutable Mutex mDolphinStateLock;
     State mCurrentState{LayerVector::StateSet::Current};
     std::atomic<int32_t> mTransactionFlags = 0;
     std::vector<std::shared_ptr<CountDownLatch>> mTransactionCommittedSignals;
@@ -1371,6 +1410,7 @@ private:
     bool mVsyncSourceReliableOnDoze = false;
     bool mDebugDisableHWC = false;
     bool mDebugDisableTransformHint = false;
+    bool mLayerCachingEnabled = false;
     volatile nsecs_t mDebugInTransaction = 0;
     bool mForceFullDamage = false;
     bool mPropagateBackpressure = true;
@@ -1389,8 +1429,6 @@ private:
     bool mUseHwcVirtualDisplays = false;
     // If blurs should be enabled on this device.
     bool mSupportsBlur = false;
-    // Disable blurs, for debugging
-    std::atomic<bool> mDisableBlurs = false;
     // If blurs are considered expensive and should require high GPU frequency.
     bool mBlursAreExpensive = false;
     bool mUseAdvanceSfOffset = false;
@@ -1506,6 +1544,7 @@ private:
     bool mLumaSampling = true;
     sp<RegionSamplingThread> mRegionSamplingThread;
     sp<FpsReporter> mFpsReporter;
+    sp<TunnelModeEnabledReporter> mTunnelModeEnabledReporter;
     ui::DisplayPrimaries mInternalDisplayPrimaries;
 
     const float mInternalDisplayDensity;
@@ -1572,35 +1611,23 @@ private:
 
     std::atomic<ui::Transform::RotationFlags> mDefaultDisplayTransformHint;
 
+    void scheduleRegionSamplingThread();
+    void notifyRegionSamplingThread();
+
     SmomoWrapper mSmoMo;
     LayerExtWrapper mLayerExt;
 
 public:
-    nsecs_t mRefreshTimeStamp = -1;
     nsecs_t mVsyncPeriod = -1;
-    std::string mNameLayerMax;
-    int mMaxQueuedFrames = -1;
-    int mNumIdle = -1;
+    DolphinWrapper mDolphinWrapper;
 
 private:
     bool mEarlyWakeUpEnabled = false;
     bool mDynamicSfIdleEnabled = false;
     bool wakeUpPresentationDisplays = false;
     bool mInternalPresentationDisplays = false;
-    bool mDolphinFuncsEnabled = false;
     bool mSmomoContentFpsEnabled = false;
-    void *mDolphinHandle = nullptr;
-    bool (*mDolphinInit)() = nullptr;
-    bool (*mDolphinMonitor)(int number, nsecs_t vsyncPeriod) = nullptr;
-    void (*mDolphinScaling)(int numIdle, int maxQueuedFrames) = nullptr;
-    void (*mDolphinRefresh)() = nullptr;
-    void (*mDolphinDequeueBuffer)(const char *name) = nullptr;
-    void (*mDolphinQueueBuffer)(const char *name) = nullptr;
 
-    FrameExtnIntf* mFrameExtn = nullptr;
-    void *mFrameExtnLibHandle = nullptr;
-    bool (*mCreateFrameExtnFunc)(FrameExtnIntf **interface) = nullptr;
-    bool (*mDestroyFrameExtnFunc)(FrameExtnIntf *interface) = nullptr;
     composer::ComposerExtnIntf *mComposerExtnIntf = nullptr;
     composer::FrameSchedulerIntf *mFrameSchedulerExtnIntf = nullptr;
     composer::DisplayExtnIntf *mDisplayExtnIntf = nullptr;

@@ -29,6 +29,7 @@
 #include <ui/GraphicTypes.h>
 #include <ui/Transform.h>
 
+#include <future>
 #include <memory>
 
 /**
@@ -42,6 +43,11 @@
  * turns on the recording.
  */
 #define PROPERTY_DEBUG_RENDERENGINE_CAPTURE_SKIA_MS "debug.renderengine.capture_skia_ms"
+
+/**
+ * Set to the most recently saved file once the capture is finished.
+ */
+#define PROPERTY_DEBUG_RENDERENGINE_CAPTURE_FILENAME "debug.renderengine.capture_filename"
 
 struct ANativeWindowBuffer;
 
@@ -99,7 +105,7 @@ public:
     // This interface, while still in use until a suitable replacement is built,
     // should be considered deprecated, minus some methods which still may be
     // used to support legacy behavior.
-    virtual void primeCache() = 0;
+    virtual std::future<void> primeCache() = 0;
 
     // dump the extension strings. always call the base class.
     virtual void dump(std::string& result) = 0;

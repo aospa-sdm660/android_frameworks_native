@@ -21,6 +21,7 @@
 #include <android/gui/IHdrLayerInfoListener.h>
 #include <android/gui/IScreenCaptureListener.h>
 #include <android/gui/ITransactionTraceListener.h>
+#include <android/gui/ITunnelModeEnabledListener.h>
 #include <binder/IBinder.h>
 #include <binder/IInterface.h>
 #include <gui/FrameTimelineInfo.h>
@@ -341,6 +342,12 @@ public:
     virtual status_t isWideColorDisplay(const sp<IBinder>& token,
                                         bool* outIsWideColorDisplay) const = 0;
 
+    /*
+     * Queries whether the given display has hardware RC or not.
+     * Requires the ACCESS_SURFACE_FLINGER permission.
+     */
+    virtual status_t isDeviceRCSupported(const sp<IBinder>& token,
+                                         bool* isDeviceRCSupported) const = 0;
     /* Registers a listener to stream median luma updates from SurfaceFlinger.
      *
      * The sampling area is bounded by both samplingArea and the given stopLayerHandle
@@ -376,6 +383,21 @@ public:
      * Removes a listener that was streaming fps updates from SurfaceFlinger.
      */
     virtual status_t removeFpsListener(const sp<gui::IFpsListener>& listener) = 0;
+
+    /* Registers a listener to receive tunnel mode enabled updates from SurfaceFlinger.
+     *
+     * Requires ACCESS_SURFACE_FLINGER permission.
+     */
+    virtual status_t addTunnelModeEnabledListener(
+            const sp<gui::ITunnelModeEnabledListener>& listener) = 0;
+
+    /*
+     * Removes a listener that was receiving tunnel mode enabled updates from SurfaceFlinger.
+     *
+     * Requires ACCESS_SURFACE_FLINGER permission.
+     */
+    virtual status_t removeTunnelModeEnabledListener(
+            const sp<gui::ITunnelModeEnabledListener>& listener) = 0;
 
     /* Sets the refresh rate boundaries for the display.
      *
@@ -579,6 +601,7 @@ public:
         GET_DISPLAYED_CONTENT_SAMPLE,
         GET_PROTECTED_CONTENT_SUPPORT,
         IS_WIDE_COLOR_DISPLAY,
+        IS_HARDWARE_RC_DISPLAY,
         GET_DISPLAY_NATIVE_PRIMARIES,
         GET_PHYSICAL_DISPLAY_IDS,
         ADD_REGION_SAMPLING_LISTENER,
@@ -607,6 +630,8 @@ public:
         ADD_HDR_LAYER_INFO_LISTENER,
         REMOVE_HDR_LAYER_INFO_LISTENER,
         ON_PULL_ATOM,
+        ADD_TUNNEL_MODE_ENABLED_LISTENER,
+        REMOVE_TUNNEL_MODE_ENABLED_LISTENER,
         // Always append new enum to the end.
     };
 

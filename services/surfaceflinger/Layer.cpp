@@ -131,10 +131,10 @@ Layer::Layer(const LayerCreationArgs& args)
     mCurrentState.frameRateSelectionPriority = PRIORITY_UNSET;
     mCurrentState.metadata = args.metadata;
     mCurrentState.shadowRadius = 0.f;
-    mCurrentState.treeHasFrameRateVote = false;
     mCurrentState.fixedTransformHint = ui::Transform::ROT_INVALID;
     mCurrentState.frameTimelineInfo = {};
     mCurrentState.postTime = -1;
+    mCurrentState.destinationFrame.makeInvalid();
 
     if (args.flags & ISurfaceComposerClient::eNoColorFill) {
         // Set an invalid color so there is no color fill.
@@ -223,7 +223,10 @@ void Layer::removeRelativeZ(const std::vector<Layer*>& layersInTree) {
 }
 
 void Layer::removeFromCurrentState() {
-    mRemovedFromCurrentState = true;
+    if (!mRemovedFromCurrentState) {
+        mRemovedFromCurrentState = true;
+        mFlinger->mScheduler->deregisterLayer(this);
+    }
 
     mFlinger->markLayerPendingRemovalLocked(this);
 }
@@ -248,7 +251,10 @@ void Layer::onRemovedFromCurrentState() {
 }
 
 void Layer::addToCurrentState() {
-    mRemovedFromCurrentState = false;
+    if (mRemovedFromCurrentState) {
+        mRemovedFromCurrentState = false;
+        mFlinger->mScheduler->registerLayer(this);
+    }
 
     for (const auto& child : mCurrentChildren) {
         child->addToCurrentState();
@@ -317,55 +323,6 @@ FloatRect Layer::getBounds(const Region& activeTransparentRegion) const {
     return reduce(mBounds, activeTransparentRegion);
 }
 
-ui::Transform Layer::getBufferScaleTransform() const {
-    // If the layer is not using NATIVE_WINDOW_SCALING_MODE_FREEZE (e.g.
-    // it isFixedSize) then there may be additional scaling not accounted
-    // for in the layer transform.
-    if (!isFixedSize() || getBuffer() == nullptr) {
-        return {};
-    }
-
-    // If the layer is a buffer state layer, the active width and height
-    // could be infinite. In that case, return the effective transform.
-    const uint32_t activeWidth = getActiveWidth(getDrawingState());
-    const uint32_t activeHeight = getActiveHeight(getDrawingState());
-    if (activeWidth >= UINT32_MAX && activeHeight >= UINT32_MAX) {
-        return {};
-    }
-
-    int bufferWidth = getBuffer()->getWidth();
-    int bufferHeight = getBuffer()->getHeight();
-
-    if (getBufferTransform() & NATIVE_WINDOW_TRANSFORM_ROT_90) {
-        std::swap(bufferWidth, bufferHeight);
-    }
-
-    float sx = activeWidth / static_cast<float>(bufferWidth);
-    float sy = activeHeight / static_cast<float>(bufferHeight);
-
-    ui::Transform extraParentScaling;
-    extraParentScaling.set(sx, 0, 0, sy);
-    return extraParentScaling;
-}
-
-ui::Transform Layer::getTransformWithScale(const ui::Transform& bufferScaleTransform) const {
-    // We need to mirror this scaling to child surfaces or we will break the contract where WM can
-    // treat child surfaces as pixels in the parent surface.
-    if (!isFixedSize() || getBuffer() == nullptr) {
-        return mEffectiveTransform;
-    }
-    return mEffectiveTransform * bufferScaleTransform;
-}
-
-FloatRect Layer::getBoundsPreScaling(const ui::Transform& bufferScaleTransform) const {
-    // We need the pre scaled layer bounds when computing child bounds to make sure the child is
-    // cropped to its parent layer after any buffer transform scaling is applied.
-    if (!isFixedSize() || getBuffer() == nullptr) {
-        return mBounds;
-    }
-    return bufferScaleTransform.inverse().transform(mBounds);
-}
-
 void Layer::computeBounds(FloatRect parentBounds, ui::Transform parentTransform,
                           float parentShadowRadius) {
     const State& s(getDrawingState());
@@ -402,11 +359,8 @@ void Layer::computeBounds(FloatRect parentBounds, ui::Transform parentTransform,
     // don't pass it to its children.
     const float childShadowRadius = canDrawShadows() ? 0.f : mEffectiveShadowRadius;
 
-    // Add any buffer scaling to the layer's children.
-    ui::Transform bufferScaleTransform = getBufferScaleTransform();
     for (const sp<Layer>& child : mDrawingChildren) {
-        child->computeBounds(getBoundsPreScaling(bufferScaleTransform),
-                             getTransformWithScale(bufferScaleTransform), childShadowRadius);
+        child->computeBounds(mBounds, mEffectiveTransform, childShadowRadius);
     }
 }
 
@@ -626,6 +580,10 @@ std::optional<compositionengine::LayerFE::LayerSettings> Layer::prepareClientCom
     layerSettings.geometry.boundaries = bounds;
     layerSettings.geometry.positionTransform = getTransform().asMatrix4();
 
+    // skip drawing content if the targetSettings indicate the content will be occluded
+    layerSettings.skipContentDraw =
+            layerSettings.skipContentDraw || !targetSettings.realContentIsVisible;
+
     if (hasColorTransform()) {
         layerSettings.colorTransform = getColorTransform();
     }
@@ -648,59 +606,6 @@ std::optional<compositionengine::LayerFE::LayerSettings> Layer::prepareClientCom
     return layerSettings;
 }
 
-std::optional<compositionengine::LayerFE::LayerSettings> Layer::prepareShadowClientComposition(
-        const LayerFE::LayerSettings& casterLayerSettings, const Rect& layerStackRect,
-        ui::Dataspace outputDataspace) {
-    renderengine::ShadowSettings shadow = getShadowSettings(layerStackRect);
-    if (shadow.length <= 0.f) {
-        return {};
-    }
-
-    const float casterAlpha = casterLayerSettings.alpha;
-    const bool casterIsOpaque = ((casterLayerSettings.source.buffer.buffer != nullptr) &&
-                                 casterLayerSettings.source.buffer.isOpaque);
-
-    compositionengine::LayerFE::LayerSettings shadowLayer = casterLayerSettings;
-
-    shadowLayer.shadow = shadow;
-    shadowLayer.geometry.boundaries = mBounds; // ignore transparent region
-
-    // If the casting layer is translucent, we need to fill in the shadow underneath the layer.
-    // Otherwise the generated shadow will only be shown around the casting layer.
-    shadowLayer.shadow.casterIsTranslucent = !casterIsOpaque || (casterAlpha < 1.0f);
-    shadowLayer.shadow.ambientColor *= casterAlpha;
-    shadowLayer.shadow.spotColor *= casterAlpha;
-    shadowLayer.sourceDataspace = outputDataspace;
-    shadowLayer.source.buffer.buffer = nullptr;
-    shadowLayer.source.buffer.fence = nullptr;
-    shadowLayer.frameNumber = 0;
-    shadowLayer.bufferId = 0;
-    shadowLayer.name = getName();
-
-    if (shadowLayer.shadow.ambientColor.a <= 0.f && shadowLayer.shadow.spotColor.a <= 0.f) {
-        return {};
-    }
-
-    float casterCornerRadius = shadowLayer.geometry.roundedCornersRadius;
-    const FloatRect& cornerRadiusCropRect = shadowLayer.geometry.roundedCornersCrop;
-    const FloatRect& casterRect = shadowLayer.geometry.boundaries;
-
-    // crop used to set the corner radius may be larger than the content rect. Adjust the corner
-    // radius accordingly.
-    if (casterCornerRadius > 0.f) {
-        float cropRectOffset = std::max(std::abs(cornerRadiusCropRect.top - casterRect.top),
-                                        std::abs(cornerRadiusCropRect.left - casterRect.left));
-        if (cropRectOffset > casterCornerRadius) {
-            casterCornerRadius = 0;
-        } else {
-            casterCornerRadius -= cropRectOffset;
-        }
-        shadowLayer.geometry.roundedCornersRadius = casterCornerRadius;
-    }
-
-    return shadowLayer;
-}
-
 void Layer::prepareClearClientComposition(LayerFE::LayerSettings& layerSettings,
                                           bool blackout) const {
     layerSettings.source.buffer.buffer = nullptr;
@@ -714,6 +619,9 @@ void Layer::prepareClearClientComposition(LayerFE::LayerSettings& layerSettings,
     layerSettings.name = getName();
 }
 
+// TODO(b/188891810): This method now only ever returns 0 or 1 layers so we should return
+// std::optional instead of a vector.  Additionally, we should consider removing
+// this method entirely in favor of calling prepareClientComposition directly.
 std::vector<compositionengine::LayerFE::LayerSettings> Layer::prepareClientCompositionList(
         compositionengine::LayerFE::ClientCompositionTargetSettings& targetSettings) {
     std::optional<compositionengine::LayerFE::LayerSettings> layerSettings =
@@ -729,21 +637,10 @@ std::vector<compositionengine::LayerFE::LayerSettings> Layer::prepareClientCompo
         return {*layerSettings};
     }
 
-    std::optional<compositionengine::LayerFE::LayerSettings> shadowSettings =
-            prepareShadowClientComposition(*layerSettings, targetSettings.viewport,
-                                           targetSettings.dataspace);
-    // There are no shadows to render.
-    if (!shadowSettings) {
-        return {*layerSettings};
-    }
+    // set the shadow for the layer if needed
+    prepareShadowClientComposition(*layerSettings, targetSettings.viewport);
 
-    // If the layer casts a shadow but the content casting the shadow is occluded, skip
-    // composing the non-shadow content and only draw the shadows.
-    if (targetSettings.realContentIsVisible) {
-        return {*shadowSettings, *layerSettings};
-    }
-
-    return {*shadowSettings};
+    return {*layerSettings};
 }
 
 Hwc2::IComposerClient::Composition Layer::getCompositionType(const DisplayDevice& display) const {
@@ -882,6 +779,11 @@ uint32_t Layer::doTransaction(uint32_t flags) {
     const State& s(getDrawingState());
     State& c(getCurrentState());
 
+    // Translates dest frame into scale and position updates. This helps align geometry calculations
+    // for BufferStateLayer with other layers. This should ideally happen in the client once client
+    // has the display orientation details from WM.
+    updateGeometry();
+
     if (c.width != s.width || c.height != s.height || !(c.transform == s.transform)) {
         // invalidate and recompute the visible regions if needed
         flags |= Layer::eVisibleRegion;
@@ -931,7 +833,14 @@ void Layer::commitTransaction(State& stateToCommit) {
         // list.
         addSurfaceFrameDroppedForBuffer(bufferSurfaceFrame);
     }
+    const bool frameRateVoteChanged =
+            mDrawingState.frameRateForLayerTree != stateToCommit.frameRateForLayerTree;
     mDrawingState = stateToCommit;
+
+    if (frameRateVoteChanged) {
+        mFlinger->mScheduler->recordLayerHistory(this, systemTime(),
+                                                 LayerHistory::LayerUpdateType::SetFrameRate);
+    }
 
     // Set the present state for all bufferlessSurfaceFramesTX to Presented. The
     // bufferSurfaceFrameTX will be presented in latchBuffer.
@@ -1341,8 +1250,7 @@ void Layer::updateTreeHasFrameRateVote() {
     };
 
     // update parents and children about the vote
-    // First traverse the tree and count how many layers has votes. In addition
-    // activate the layers in Scheduler's LayerHistory for it to check for changes
+    // First traverse the tree and count how many layers has votes.
     int layersWithVote = 0;
     traverseTree([&layersWithVote](Layer* layer) {
         const auto layerVotedWithDefaultCompatibility =
@@ -1362,20 +1270,11 @@ void Layer::updateTreeHasFrameRateVote() {
         }
     });
 
-    // Now update the other layers
+    // Now we can update the tree frame rate vote for each layer in the tree
+    const bool treeHasFrameRateVote = layersWithVote > 0;
     bool transactionNeeded = false;
-    traverseTree([layersWithVote, &transactionNeeded, this](Layer* layer) {
-        const bool treeHasFrameRateVote = layersWithVote > 0;
-        if (layer->mCurrentState.treeHasFrameRateVote != treeHasFrameRateVote) {
-            layer->mCurrentState.sequence++;
-            layer->mCurrentState.treeHasFrameRateVote = treeHasFrameRateVote;
-            layer->mCurrentState.modified = true;
-            layer->setTransactionFlags(eTransactionNeeded);
-            transactionNeeded = true;
-
-            mFlinger->mScheduler->recordLayerHistory(layer, systemTime(),
-                                                     LayerHistory::LayerUpdateType::SetFrameRate);
-        }
+    traverseTree([treeHasFrameRateVote, &transactionNeeded](Layer* layer) {
+        transactionNeeded = layer->updateFrameRateForLayerTree(treeHasFrameRateVote);
     });
 
     if (transactionNeeded) {
@@ -1504,32 +1403,42 @@ std::shared_ptr<frametimeline::SurfaceFrame> Layer::createSurfaceFrameForBuffer(
     return surfaceFrame;
 }
 
-Layer::FrameRate Layer::getFrameRateForLayerTree() const {
-    const auto frameRate = getDrawingState().frameRate;
+bool Layer::updateFrameRateForLayerTree(bool treeHasFrameRateVote) {
+    const auto updateCurrentState = [&](FrameRate frameRate) {
+        if (mCurrentState.frameRateForLayerTree == frameRate) {
+            return false;
+        }
+        mCurrentState.frameRateForLayerTree = frameRate;
+        mCurrentState.sequence++;
+        mCurrentState.modified = true;
+        setTransactionFlags(eTransactionNeeded);
+        return true;
+    };
+
+    const auto frameRate = mCurrentState.frameRate;
     if (frameRate.rate.isValid() || frameRate.type == FrameRateCompatibility::NoVote) {
-        return frameRate;
+        return updateCurrentState(frameRate);
     }
 
     // This layer doesn't have a frame rate. Check if its ancestors have a vote
-    if (sp<Layer> parent = getParent(); parent) {
-        if (const auto parentFrameRate = parent->getFrameRateForLayerTree();
-            parentFrameRate.rate.isValid()) {
-            return parentFrameRate;
+    for (sp<Layer> parent = getParent(); parent; parent = parent->getParent()) {
+        if (parent->mCurrentState.frameRate.rate.isValid()) {
+            return updateCurrentState(parent->mCurrentState.frameRate);
         }
     }
 
     // This layer and its ancestors don't have a frame rate. If one of successors
     // has a vote, return a NoVote for successors to set the vote
-    if (getDrawingState().treeHasFrameRateVote) {
-        return {Fps(0.0f), FrameRateCompatibility::NoVote};
+    if (treeHasFrameRateVote) {
+        return updateCurrentState(FrameRate(Fps(0.0f), FrameRateCompatibility::NoVote));
     }
 
-    return frameRate;
+    return updateCurrentState(frameRate);
 }
 
-// ----------------------------------------------------------------------------
-// pageflip handling...
-// ----------------------------------------------------------------------------
+Layer::FrameRate Layer::getFrameRateForLayerTree() const {
+    return getDrawingState().frameRateForLayerTree;
+}
 
 bool Layer::isHiddenByPolicy() const {
     const State& s(mDrawingState);
@@ -1775,12 +1684,25 @@ size_t Layer::getChildrenCount() const {
     return count;
 }
 
+void Layer::setGameModeForTree(int parentGameMode) {
+    int gameMode = parentGameMode;
+    auto& currentState = getCurrentState();
+    if (currentState.metadata.has(METADATA_GAME_MODE)) {
+        gameMode = currentState.metadata.getInt32(METADATA_GAME_MODE, 0);
+    }
+    setGameMode(gameMode);
+    for (const sp<Layer>& child : mCurrentChildren) {
+        child->setGameModeForTree(gameMode);
+    }
+}
+
 void Layer::addChild(const sp<Layer>& layer) {
     mChildrenChanged = true;
     setTransactionFlags(eTransactionNeeded);
 
     mCurrentChildren.add(layer);
     layer->setParent(this);
+    layer->setGameModeForTree(mGameMode);
     updateTreeHasFrameRateVote();
 }
 
@@ -1792,6 +1714,7 @@ ssize_t Layer::removeChild(const sp<Layer>& layer) {
     const auto removeResult = mCurrentChildren.remove(layer);
 
     updateTreeHasFrameRateVote();
+    layer->setGameModeForTree(0);
     layer->updateTreeHasFrameRateVote();
 
     return removeResult;
@@ -1800,8 +1723,7 @@ ssize_t Layer::removeChild(const sp<Layer>& layer) {
 void Layer::setChildrenDrawingParent(const sp<Layer>& newParent) {
     for (const sp<Layer>& child : mDrawingChildren) {
         child->mDrawingParent = newParent;
-        child->computeBounds(newParent->mBounds,
-                             newParent->getTransformWithScale(newParent->getBufferScaleTransform()),
+        child->computeBounds(newParent->mBounds, newParent->mEffectiveTransform,
                              newParent->mEffectiveShadowRadius);
     }
 }
@@ -2145,8 +2067,14 @@ Layer::RoundedCornerState Layer::getRoundedCornerState() const {
             : RoundedCornerState();
 }
 
-renderengine::ShadowSettings Layer::getShadowSettings(const Rect& layerStackRect) const {
+void Layer::prepareShadowClientComposition(LayerFE::LayerSettings& caster,
+                                           const Rect& layerStackRect) {
     renderengine::ShadowSettings state = mFlinger->mDrawingState.globalShadowSettings;
+
+    // Note: this preserves existing behavior of shadowing the entire layer and not cropping it if
+    // transparent regions are present. This may not be necessary since shadows are only cast by
+    // SurfaceFlinger's EffectLayers, which do not typically use transparent regions.
+    state.boundaries = mBounds;
 
     // Shift the spot light x-position to the middle of the display and then
     // offset it by casting layer's screen pos.
@@ -2154,7 +2082,22 @@ renderengine::ShadowSettings Layer::getShadowSettings(const Rect& layerStackRect
     state.lightPos.y -= mScreenBounds.top;
 
     state.length = mEffectiveShadowRadius;
-    return state;
+
+    if (state.length > 0.f) {
+        const float casterAlpha = caster.alpha;
+        const bool casterIsOpaque =
+                ((caster.source.buffer.buffer != nullptr) && caster.source.buffer.isOpaque);
+
+        // If the casting layer is translucent, we need to fill in the shadow underneath the layer.
+        // Otherwise the generated shadow will only be shown around the casting layer.
+        state.casterIsTranslucent = !casterIsOpaque || (casterAlpha < 1.0f);
+        state.ambientColor *= casterAlpha;
+        state.spotColor *= casterAlpha;
+
+        if (state.ambientColor.a > 0.f && state.spotColor.a > 0.f) {
+            caster.shadow = state;
+        }
+    }
 }
 
 void Layer::commitChildList() {

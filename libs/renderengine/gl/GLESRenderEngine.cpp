@@ -515,9 +515,10 @@ Framebuffer* GLESRenderEngine::getFramebufferForDrawing() {
     return mDrawingBuffer.get();
 }
 
-void GLESRenderEngine::primeCache() {
+std::future<void> GLESRenderEngine::primeCache() {
     ProgramCache::getInstance().primeCache(mInProtectedContext ? mProtectedEGLContext : mEGLContext,
                                            mUseColorManagement, mPrecacheToneMapperShaderOnly);
+    return {};
 }
 
 base::unique_fd GLESRenderEngine::flush() {
@@ -1233,8 +1234,10 @@ status_t GLESRenderEngine::drawLayers(const DisplaySettings& display,
             }
         }
 
-        mState.maxMasteringLuminance = layer->source.buffer.maxMasteringLuminance;
-        mState.maxContentLuminance = layer->source.buffer.maxContentLuminance;
+        // Ensure luminance is at least 100 nits to avoid div-by-zero
+        const float maxLuminance = std::max(100.f, layer->source.buffer.maxLuminanceNits);
+        mState.maxMasteringLuminance = maxLuminance;
+        mState.maxContentLuminance = maxLuminance;
         mState.projectionMatrix = projectionMatrix * layer->geometry.positionTransform;
 
         const FloatRect bounds = layer->geometry.boundaries;

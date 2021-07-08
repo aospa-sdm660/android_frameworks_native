@@ -141,9 +141,6 @@ public:
     // See IGraphicBufferProducer::getNextFrameNumber
     uint64_t getNextFrameNumber() const;
 
-    bool isBufferAccumulated() const;
-    void setPresentTimeMode(int mode);
-
     /* Set the scaling mode to be used with a Surface.
      * See NATIVE_WINDOW_SET_SCALING_MODE and its parameters
      * in <system/window.h>. */
@@ -279,9 +276,9 @@ private:
     int dispatchAddQueueInterceptor(va_list args);
     int dispatchAddQueryInterceptor(va_list args);
     int dispatchGetLastQueuedBuffer(va_list args);
+    int dispatchGetLastQueuedBuffer2(va_list args);
     int dispatchSetFrameTimelineInfo(va_list args);
     int dispatchGetExtraBufferCount(va_list args);
-    bool transformToDisplayInverse();
 
 protected:
     virtual int dequeueBuffer(ANativeWindowBuffer** buffer, int* fenceFd);
@@ -493,6 +490,8 @@ protected:
     // mTransformHint is the transform probably applied to buffers of this
     // window. this is only a hint, actual transform may differ.
     uint32_t mTransformHint;
+    virtual uint32_t getTransformHint() const { return mTransformHint; }
+    bool transformToDisplayInverse() const;
 
     // mProducerControlledByApp whether this buffer producer is controlled
     // by the application
@@ -571,9 +570,6 @@ protected:
 
     uint64_t mNextFrameNumber = 1;
     uint64_t mLastFrameNumber = 0;
-
-    bool mIsBufferAccumulated = false;
-    int mPresentTimeMode = -1;
 
     // Mutable because ANativeWindow::query needs this class const.
     mutable bool mQueriedSupportedTimestamps;

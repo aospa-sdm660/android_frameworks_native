@@ -19,7 +19,6 @@
 #include "DispSyncSource.h"
 
 #include <android-base/stringprintf.h>
-#include <dlfcn.h>
 #include <utils/Trace.h>
 #include <mutex>
 
@@ -61,8 +60,7 @@ public:
                 mRegistration.schedule({.workDuration = mWorkDuration.count(),
                                         .readyDuration = mReadyDuration.count(),
                                         .earliestVsync = mLastCallTime.count()});
-        LOG_ALWAYS_FATAL_IF((scheduleResult != scheduler::ScheduleResult::Scheduled),
-                            "Error scheduling callback: rc %X", scheduleResult);
+        LOG_ALWAYS_FATAL_IF((!scheduleResult.has_value()), "Error scheduling callback");
     }
 
     void stop() {
@@ -101,8 +99,7 @@ private:
                     mRegistration.schedule({.workDuration = mWorkDuration.count(),
                                             .readyDuration = mReadyDuration.count(),
                                             .earliestVsync = vsyncTime});
-            LOG_ALWAYS_FATAL_IF((scheduleResult != ScheduleResult::Scheduled),
-                                "Error rescheduling callback: rc %X", scheduleResult);
+            LOG_ALWAYS_FATAL_IF(!scheduleResult.has_value(), "Error rescheduling callback");
         }
     }
 
@@ -135,22 +132,9 @@ DispSyncSource::DispSyncSource(scheduler::VSyncDispatch& vSyncDispatch,
                                                          std::placeholders::_3),
                                                name, workDuration, readyDuration,
                                                std::chrono::steady_clock::now().time_since_epoch());
-
-        mDolphinHandle = dlopen("libdolphin.so", RTLD_NOW);
-        if (!mDolphinHandle) {
-            ALOGW("Unable to open libdolphin.so: %s.", dlerror());
-        } else {
-            mDolphinCheck = (bool (*) (const char*))dlsym(mDolphinHandle, "dolphinCheck");
-            if (!mDolphinCheck) {
-                dlclose(mDolphinHandle);
-            }
-        }
 }
 
-DispSyncSource::~DispSyncSource() {
-    if(mDolphinCheck)
-        dlclose(mDolphinHandle);
-}
+DispSyncSource::~DispSyncSource() {}
 
 void DispSyncSource::setVSyncEnabled(bool enable) {
     std::lock_guard lock(mVsyncMutex);
@@ -160,11 +144,6 @@ void DispSyncSource::setVSyncEnabled(bool enable) {
     } else {
         mCallbackRepeater->stop();
         // ATRACE_INT(mVsyncOnLabel.c_str(), 0);
-        if (mDolphinCheck) {
-            if (mDolphinCheck(mName)) {
-                mCallbackRepeater->start(mWorkDuration, mReadyDuration);
-            }
-        }
     }
     mEnabled = enable;
 }

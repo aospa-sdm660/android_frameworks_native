@@ -748,6 +748,25 @@ public:
         return error;
     }
 
+    status_t isDeviceRCSupported(const sp<IBinder>& token,
+                                 bool* outDeviceRCSupported) const override {
+        Parcel data, reply;
+        status_t error = data.writeInterfaceToken(ISurfaceComposer::getInterfaceDescriptor());
+        if (error != NO_ERROR) {
+            return error;
+        }
+        error = data.writeStrongBinder(token);
+        if (error != NO_ERROR) {
+            return error;
+        }
+        error = remote()->transact(BnSurfaceComposer::IS_HARDWARE_RC_DISPLAY, data, &reply);
+        if (error != NO_ERROR) {
+            return error;
+        }
+        error = reply.readBool(outDeviceRCSupported);
+        return error;
+    }
+
     status_t addRegionSamplingListener(const Rect& samplingArea, const sp<IBinder>& stopLayerHandle,
                                        const sp<IRegionSamplingListener>& listener) override {
         Parcel data, reply;
@@ -820,6 +839,36 @@ public:
                 remote()->transact(BnSurfaceComposer::REMOVE_FPS_LISTENER, data, &reply);
         if (error != OK) {
             ALOGE("removeFpsListener: Failed to transact");
+        }
+        return error;
+    }
+
+    virtual status_t addTunnelModeEnabledListener(
+            const sp<gui::ITunnelModeEnabledListener>& listener) {
+        Parcel data, reply;
+        SAFE_PARCEL(data.writeInterfaceToken, ISurfaceComposer::getInterfaceDescriptor());
+        SAFE_PARCEL(data.writeStrongBinder, IInterface::asBinder(listener));
+
+        const status_t error =
+                remote()->transact(BnSurfaceComposer::ADD_TUNNEL_MODE_ENABLED_LISTENER, data,
+                                   &reply);
+        if (error != NO_ERROR) {
+            ALOGE("addTunnelModeEnabledListener: Failed to transact");
+        }
+        return error;
+    }
+
+    virtual status_t removeTunnelModeEnabledListener(
+            const sp<gui::ITunnelModeEnabledListener>& listener) {
+        Parcel data, reply;
+        SAFE_PARCEL(data.writeInterfaceToken, ISurfaceComposer::getInterfaceDescriptor());
+        SAFE_PARCEL(data.writeStrongBinder, IInterface::asBinder(listener));
+
+        const status_t error =
+                remote()->transact(BnSurfaceComposer::REMOVE_TUNNEL_MODE_ENABLED_LISTENER, data,
+                                   &reply);
+        if (error != NO_ERROR) {
+            ALOGE("removeTunnelModeEnabledListener: Failed to transact");
         }
         return error;
     }
@@ -1674,6 +1723,20 @@ status_t BnSurfaceComposer::onTransact(
             }
             return error;
         }
+        case IS_HARDWARE_RC_DISPLAY: {
+            CHECK_INTERFACE(ISurfaceComposer, data, reply);
+            sp<IBinder> display = nullptr;
+            status_t error = data.readStrongBinder(&display);
+            if (error != NO_ERROR) {
+                return error;
+            }
+            bool result;
+            error = isDeviceRCSupported(display, &result);
+            if (error == NO_ERROR) {
+                reply->writeBool(result);
+            }
+            return error;
+        }
         case GET_PHYSICAL_DISPLAY_IDS: {
             CHECK_INTERFACE(ISurfaceComposer, data, reply);
             std::vector<PhysicalDisplayId> ids = getPhysicalDisplayIds();
@@ -1739,6 +1802,26 @@ status_t BnSurfaceComposer::onTransact(
                 return result;
             }
             return removeFpsListener(listener);
+        }
+        case ADD_TUNNEL_MODE_ENABLED_LISTENER: {
+            CHECK_INTERFACE(ISurfaceComposer, data, reply);
+            sp<gui::ITunnelModeEnabledListener> listener;
+            status_t result = data.readNullableStrongBinder(&listener);
+            if (result != NO_ERROR) {
+                ALOGE("addTunnelModeEnabledListener: Failed to read listener");
+                return result;
+            }
+            return addTunnelModeEnabledListener(listener);
+        }
+        case REMOVE_TUNNEL_MODE_ENABLED_LISTENER: {
+            CHECK_INTERFACE(ISurfaceComposer, data, reply);
+            sp<gui::ITunnelModeEnabledListener> listener;
+            status_t result = data.readNullableStrongBinder(&listener);
+            if (result != NO_ERROR) {
+                ALOGE("removeTunnelModeEnabledListener: Failed to read listener");
+                return result;
+            }
+            return removeTunnelModeEnabledListener(listener);
         }
         case SET_DESIRED_DISPLAY_MODE_SPECS: {
             CHECK_INTERFACE(ISurfaceComposer, data, reply);

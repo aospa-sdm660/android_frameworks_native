@@ -65,12 +65,12 @@ ComposerService::ComposerService()
     connectLocked();
 }
 
-void ComposerService::connectLocked() {
+bool ComposerService::connectLocked() {
     const String16 name("SurfaceFlinger");
-    while (getService(name, &mComposerService) != NO_ERROR) {
-        usleep(250000);
+    mComposerService = waitForService<ISurfaceComposer>(name);
+    if (mComposerService == nullptr) {
+        return false; // fatal error or permission problem
     }
-    assert(mComposerService != nullptr);
 
     // Create the death listener.
     class DeathObserver : public IBinder::DeathRecipient {
@@ -86,15 +86,16 @@ void ComposerService::connectLocked() {
 
     mDeathObserver = new DeathObserver(*const_cast<ComposerService*>(this));
     IInterface::asBinder(mComposerService)->linkToDeath(mDeathObserver);
+    return true;
 }
 
 /*static*/ sp<ISurfaceComposer> ComposerService::getComposerService() {
     ComposerService& instance = ComposerService::getInstance();
     Mutex::Autolock _l(instance.mLock);
     if (instance.mComposerService == nullptr) {
-        ComposerService::getInstance().connectLocked();
-        assert(instance.mComposerService != nullptr);
-        ALOGD("ComposerService reconnected");
+        if (ComposerService::getInstance().connectLocked()) {
+            ALOGD("ComposerService reconnected");
+        }
     }
     return instance.mComposerService;
 }
@@ -1675,6 +1676,21 @@ SurfaceComposerClient::Transaction& SurfaceComposerClient::Transaction::setBuffe
     return *this;
 }
 
+SurfaceComposerClient::Transaction& SurfaceComposerClient::Transaction::setDestinationFrame(
+        const sp<SurfaceControl>& sc, const Rect& destinationFrame) {
+    layer_state_t* s = getLayerState(sc);
+    if (!s) {
+        mStatus = BAD_INDEX;
+        return *this;
+    }
+
+    s->what |= layer_state_t::eDestinationFrameChanged;
+    s->destinationFrame = destinationFrame;
+
+    registerSurfaceControlForCallback(sc);
+    return *this;
+}
+
 // ---------------------------------------------------------------------------
 
 DisplayState& SurfaceComposerClient::Transaction::getDisplayState(const sp<IBinder>& token) {
@@ -2040,6 +2056,12 @@ status_t SurfaceComposerClient::isWideColorDisplay(const sp<IBinder>& display,
                                                                      outIsWideColorDisplay);
 }
 
+status_t SurfaceComposerClient::isDeviceRCSupported(const sp<IBinder>& display,
+                                                    bool* outDeviceRCSupported) {
+    return ComposerService::getComposerService()->isDeviceRCSupported(display,
+                                                                      outDeviceRCSupported);
+}
+
 status_t SurfaceComposerClient::addRegionSamplingListener(
         const Rect& samplingArea, const sp<IBinder>& stopLayerHandle,
         const sp<IRegionSamplingListener>& listener) {
@@ -2060,6 +2082,16 @@ status_t SurfaceComposerClient::addFpsListener(int32_t taskId,
 
 status_t SurfaceComposerClient::removeFpsListener(const sp<gui::IFpsListener>& listener) {
     return ComposerService::getComposerService()->removeFpsListener(listener);
+}
+
+status_t SurfaceComposerClient::addTunnelModeEnabledListener(
+        const sp<gui::ITunnelModeEnabledListener>& listener) {
+    return ComposerService::getComposerService()->addTunnelModeEnabledListener(listener);
+}
+
+status_t SurfaceComposerClient::removeTunnelModeEnabledListener(
+        const sp<gui::ITunnelModeEnabledListener>& listener) {
+    return ComposerService::getComposerService()->removeTunnelModeEnabledListener(listener);
 }
 
 bool SurfaceComposerClient::getDisplayBrightnessSupport(const sp<IBinder>& displayToken) {

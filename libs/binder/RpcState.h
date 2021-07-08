@@ -21,6 +21,7 @@
 #include <binder/RpcSession.h>
 
 #include <map>
+#include <optional>
 #include <queue>
 
 namespace android {
@@ -100,6 +101,20 @@ private:
      */
     void terminate();
 
+    // Alternative to std::vector<uint8_t> that doesn't abort on allocation failure and caps
+    // large allocations to avoid being requested from allocating too much data.
+    struct CommandData {
+        explicit CommandData(size_t size);
+        bool valid() { return mSize == 0 || mData != nullptr; }
+        size_t size() { return mSize; }
+        uint8_t* data() { return mData.get(); }
+        uint8_t* release() { return mData.release(); }
+
+    private:
+        std::unique_ptr<uint8_t[]> mData;
+        size_t mSize;
+    };
+
     [[nodiscard]] bool rpcSend(const base::unique_fd& fd, const char* what, const void* data,
                                size_t size);
     [[nodiscard]] bool rpcRec(const base::unique_fd& fd, const char* what, void* data, size_t size);
@@ -113,7 +128,7 @@ private:
                                            const RpcWireHeader& command);
     [[nodiscard]] status_t processTransactInternal(const base::unique_fd& fd,
                                                    const sp<RpcSession>& session,
-                                                   std::vector<uint8_t>&& transactionData);
+                                                   CommandData transactionData);
     [[nodiscard]] status_t processDecStrong(const base::unique_fd& fd,
                                             const RpcWireHeader& command);
 
@@ -148,7 +163,7 @@ private:
 
         // async transaction queue, _only_ for local binder
         struct AsyncTodo {
-            std::vector<uint8_t> data; // most convenient format, to move it here
+            CommandData data;
             uint64_t asyncNumber = 0;
 
             bool operator<(const AsyncTodo& o) const {

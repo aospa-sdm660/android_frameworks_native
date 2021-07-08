@@ -50,6 +50,7 @@ class HdrCapabilities;
 class ISurfaceComposerClient;
 class IGraphicBufferProducer;
 class IRegionSamplingListener;
+class ITunnelModeEnabledListener;
 class Region;
 
 struct SurfaceControlStats {
@@ -187,6 +188,9 @@ public:
 
     // Queries whether a given display is wide color display.
     static status_t isWideColorDisplay(const sp<IBinder>& display, bool* outIsWideColorDisplay);
+
+    // Queries whether a given display has support of Hardware RC.
+    static status_t isDeviceRCSupported(const sp<IBinder>& display, bool* outDeviceRCSupported);
 
     /*
      * Returns whether brightness operations are supported on a display.
@@ -554,6 +558,8 @@ public:
                                       const StretchEffect& stretchEffect);
 
         Transaction& setBufferCrop(const sp<SurfaceControl>& sc, const Rect& bufferCrop);
+        Transaction& setDestinationFrame(const sp<SurfaceControl>& sc,
+                                         const Rect& destinationFrame);
 
         status_t setDisplaySurface(const sp<IBinder>& token,
                 const sp<IGraphicBufferProducer>& bufferProducer);
@@ -608,6 +614,10 @@ public:
     static status_t removeRegionSamplingListener(const sp<IRegionSamplingListener>& listener);
     static status_t addFpsListener(int32_t taskId, const sp<gui::IFpsListener>& listener);
     static status_t removeFpsListener(const sp<gui::IFpsListener>& listener);
+    static status_t addTunnelModeEnabledListener(
+            const sp<gui::ITunnelModeEnabledListener>& listener);
+    static status_t removeTunnelModeEnabledListener(
+            const sp<gui::ITunnelModeEnabledListener>& listener);
 
 private:
     virtual void onFirstRef();
