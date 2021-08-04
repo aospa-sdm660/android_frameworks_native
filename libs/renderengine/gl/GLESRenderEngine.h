@@ -62,13 +62,13 @@ public:
     void deleteTextures(size_t count, uint32_t const* names) override;
     bool isProtected() const override { return mInProtectedContext; }
     bool supportsProtectedContent() const override;
-    bool useProtectedContext(bool useProtectedContext) override;
+    void useProtectedContext(bool useProtectedContext) override;
     status_t drawLayers(const DisplaySettings& display,
                         const std::vector<const LayerSettings*>& layers,
                         const std::shared_ptr<ExternalTexture>& buffer,
                         const bool useFramebufferCache, base::unique_fd&& bufferFence,
                         base::unique_fd* drawFence) override;
-    bool cleanupPostRender(CleanupMode mode) override;
+    void cleanupPostRender() override;
     int getContextPriority() override;
     bool supportsBackgroundBlur() override { return mBlurFilter != nullptr; }
     void onPrimaryDisplaySizeChanged(ui::Size size) override {}
@@ -106,6 +106,7 @@ protected:
     void mapExternalTextureBuffer(const sp<GraphicBuffer>& buffer, bool isRenderable)
             EXCLUDES(mRenderingMutex);
     void unmapExternalTextureBuffer(const sp<GraphicBuffer>& buffer) EXCLUDES(mRenderingMutex);
+    bool canSkipPostRenderCleanup() const override;
 
 private:
     friend class BindNativeBufferAsFramebuffer;

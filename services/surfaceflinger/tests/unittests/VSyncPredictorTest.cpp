@@ -478,7 +478,7 @@ TEST_F(VSyncPredictorTest, isVSyncInPhase) {
     }
 }
 
-TEST_F(VSyncPredictorTest, InconsistentVsyncValueIsFlushedEventually) {
+TEST_F(VSyncPredictorTest, inconsistentVsyncValueIsFlushedEventually) {
     EXPECT_TRUE(tracker.addVsyncTimestamp(600));
     EXPECT_TRUE(tracker.needsMoreSamples());
 
@@ -490,6 +490,46 @@ TEST_F(VSyncPredictorTest, InconsistentVsyncValueIsFlushedEventually) {
     }
 
     EXPECT_FALSE(tracker.needsMoreSamples());
+}
+
+TEST_F(VSyncPredictorTest, knownVsyncIsUpdated) {
+    EXPECT_TRUE(tracker.addVsyncTimestamp(600));
+    EXPECT_TRUE(tracker.needsMoreSamples());
+    EXPECT_EQ(600, tracker.nextAnticipatedVSyncTimeFrom(mNow));
+
+    EXPECT_FALSE(tracker.addVsyncTimestamp(mNow += mPeriod));
+    EXPECT_EQ(mNow + 1000, tracker.nextAnticipatedVSyncTimeFrom(mNow));
+
+    for (auto i = 0u; i < kMinimumSamplesForPrediction; i++) {
+        EXPECT_TRUE(tracker.needsMoreSamples());
+        EXPECT_TRUE(tracker.addVsyncTimestamp(mNow += mPeriod));
+        EXPECT_EQ(mNow + 1000, tracker.nextAnticipatedVSyncTimeFrom(mNow));
+    }
+
+    EXPECT_FALSE(tracker.needsMoreSamples());
+    EXPECT_EQ(mNow + 1000, tracker.nextAnticipatedVSyncTimeFrom(mNow));
+}
+
+TEST_F(VSyncPredictorTest, robustToDuplicateTimestamps_60hzRealTraceData) {
+    // these are real vsync timestamps from b/190331974 which caused vsync predictor
+    // period to spike to 18ms due to very close timestamps
+    std::vector<nsecs_t> const simulatedVsyncs{
+            198353408177, 198370074844, 198371400000, 198374274000, 198390941000, 198407565000,
+            198540887994, 198607538588, 198624218276, 198657655939, 198674224176, 198690880955,
+            198724204319, 198740988133, 198758166681, 198790869196, 198824205052, 198840871678,
+            198857715631, 198890885797, 198924199640, 198940873834, 198974204401,
+    };
+    auto constexpr idealPeriod = 16'666'666;
+    auto constexpr expectedPeriod = 16'644'742;
+    auto constexpr expectedIntercept = 125'626;
+
+    tracker.setPeriod(idealPeriod);
+    for (auto const& timestamp : simulatedVsyncs) {
+        tracker.addVsyncTimestamp(timestamp);
+    }
+    auto [slope, intercept] = tracker.getVSyncPredictionModel();
+    EXPECT_THAT(slope, IsCloseTo(expectedPeriod, mMaxRoundingError));
+    EXPECT_THAT(intercept, IsCloseTo(expectedIntercept, mMaxRoundingError));
 }
 
 } // namespace android::scheduler

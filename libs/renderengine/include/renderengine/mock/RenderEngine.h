@@ -44,8 +44,9 @@ public:
     MOCK_CONST_METHOD0(getMaxViewportDims, size_t());
     MOCK_CONST_METHOD0(isProtected, bool());
     MOCK_CONST_METHOD0(supportsProtectedContent, bool());
-    MOCK_METHOD1(useProtectedContext, bool(bool));
-    MOCK_METHOD1(cleanupPostRender, bool(CleanupMode mode));
+    MOCK_METHOD1(useProtectedContext, void(bool));
+    MOCK_METHOD0(cleanupPostRender, void());
+    MOCK_CONST_METHOD0(canSkipPostRenderCleanup, bool());
     MOCK_METHOD2(setViewportAndProjection,
                  void(Rect,  Rect));
     MOCK_METHOD6(drawLayers,

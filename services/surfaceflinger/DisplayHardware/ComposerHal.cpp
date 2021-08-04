@@ -323,9 +323,8 @@ uint32_t Composer::getMaxVirtualDisplayCount()
     return unwrapRet(ret, 0);
 }
 
-Error Composer::createVirtualDisplay(uint32_t width, uint32_t height,
-            PixelFormat* format, Display* outDisplay)
-{
+Error Composer::createVirtualDisplay(uint32_t width, uint32_t height, PixelFormat* format,
+                                     std::optional<Display>, Display* outDisplay) {
     const uint32_t bufferSlotCount = 1;
     Error error = kDefaultError;
     if (mClient_2_2) {
@@ -754,6 +753,11 @@ Error Composer::presentOrValidateDisplay(Display display, uint32_t* outNumTypes,
     }
 
    mReader.takePresentOrValidateStage(display, state);
+
+   if (*state == 2) { // Validate and present succeeded.
+       mReader.takePresentFence(display, outPresentFence);
+       mReader.hasChanges(display, outNumTypes, outNumRequests);
+   }
 
    if (*state == 1) { // Present succeeded
        mReader.takePresentFence(display, outPresentFence);

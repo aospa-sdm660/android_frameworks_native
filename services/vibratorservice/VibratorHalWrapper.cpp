@@ -95,7 +95,10 @@ HalResult<void> HalResult<void>::fromStatus(status_t status) {
 }
 
 HalResult<void> HalResult<void>::fromStatus(binder::Status status) {
-    if (status.exceptionCode() == binder::Status::EX_UNSUPPORTED_OPERATION) {
+    if (status.exceptionCode() == binder::Status::EX_UNSUPPORTED_OPERATION ||
+        status.transactionError() == android::UNKNOWN_TRANSACTION) {
+        // UNKNOWN_TRANSACTION means the HAL implementation is an older version, so this is
+        // the same as the operation being unsupported by this HAL. Should not retry.
         return HalResult<void>::unsupported();
     }
     if (status.isOk()) {
@@ -131,6 +134,18 @@ Info HalWrapper::getInfo() {
     }
     if (mInfoCache.mSupportedBraking.isFailed()) {
         mInfoCache.mSupportedBraking = getSupportedBrakingInternal();
+    }
+    if (mInfoCache.mPrimitiveDelayMax.isFailed()) {
+        mInfoCache.mPrimitiveDelayMax = getPrimitiveDelayMaxInternal();
+    }
+    if (mInfoCache.mPwlePrimitiveDurationMax.isFailed()) {
+        mInfoCache.mPwlePrimitiveDurationMax = getPrimitiveDurationMaxInternal();
+    }
+    if (mInfoCache.mCompositionSizeMax.isFailed()) {
+        mInfoCache.mCompositionSizeMax = getCompositionSizeMaxInternal();
+    }
+    if (mInfoCache.mPwleSizeMax.isFailed()) {
+        mInfoCache.mPwleSizeMax = getPwleSizeMaxInternal();
     }
     if (mInfoCache.mMinFrequency.isFailed()) {
         mInfoCache.mMinFrequency = getMinFrequencyInternal();
@@ -204,6 +219,26 @@ HalResult<std::vector<milliseconds>> HalWrapper::getPrimitiveDurationsInternal(
         const std::vector<CompositePrimitive>&) {
     ALOGV("Skipped getPrimitiveDurations because it's not available in Vibrator HAL");
     return HalResult<std::vector<milliseconds>>::unsupported();
+}
+
+HalResult<milliseconds> HalWrapper::getPrimitiveDelayMaxInternal() {
+    ALOGV("Skipped getPrimitiveDelayMaxInternal because it's not available in Vibrator HAL");
+    return HalResult<milliseconds>::unsupported();
+}
+
+HalResult<milliseconds> HalWrapper::getPrimitiveDurationMaxInternal() {
+    ALOGV("Skipped getPrimitiveDurationMaxInternal because it's not available in Vibrator HAL");
+    return HalResult<milliseconds>::unsupported();
+}
+
+HalResult<int32_t> HalWrapper::getCompositionSizeMaxInternal() {
+    ALOGV("Skipped getCompositionSizeMaxInternal because it's not available in Vibrator HAL");
+    return HalResult<int32_t>::unsupported();
+}
+
+HalResult<int32_t> HalWrapper::getPwleSizeMaxInternal() {
+    ALOGV("Skipped getPwleSizeMaxInternal because it's not available in Vibrator HAL");
+    return HalResult<int32_t>::unsupported();
 }
 
 HalResult<float> HalWrapper::getMinFrequencyInternal() {
@@ -378,6 +413,30 @@ HalResult<std::vector<milliseconds>> AidlHalWrapper::getPrimitiveDurationsIntern
     }
 
     return HalResult<std::vector<milliseconds>>::ok(durations);
+}
+
+HalResult<milliseconds> AidlHalWrapper::getPrimitiveDelayMaxInternal() {
+    int32_t delay = 0;
+    auto result = getHal()->getCompositionDelayMax(&delay);
+    return HalResult<milliseconds>::fromStatus(result, milliseconds(delay));
+}
+
+HalResult<milliseconds> AidlHalWrapper::getPrimitiveDurationMaxInternal() {
+    int32_t delay = 0;
+    auto result = getHal()->getPwlePrimitiveDurationMax(&delay);
+    return HalResult<milliseconds>::fromStatus(result, milliseconds(delay));
+}
+
+HalResult<int32_t> AidlHalWrapper::getCompositionSizeMaxInternal() {
+    int32_t size = 0;
+    auto result = getHal()->getCompositionSizeMax(&size);
+    return HalResult<int32_t>::fromStatus(result, size);
+}
+
+HalResult<int32_t> AidlHalWrapper::getPwleSizeMaxInternal() {
+    int32_t size = 0;
+    auto result = getHal()->getPwleCompositionSizeMax(&size);
+    return HalResult<int32_t>::fromStatus(result, size);
 }
 
 HalResult<float> AidlHalWrapper::getMinFrequencyInternal() {

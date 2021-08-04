@@ -53,8 +53,8 @@ public:
 
     bool isProtected() const override;
     bool supportsProtectedContent() const override;
-    bool useProtectedContext(bool useProtectedContext) override;
-    bool cleanupPostRender(CleanupMode mode) override;
+    void useProtectedContext(bool useProtectedContext) override;
+    void cleanupPostRender() override;
     void setViewportAndProjection(Rect viewPort, Rect sourceCrop) override;
 
     status_t drawLayers(const DisplaySettings& display,
@@ -71,6 +71,7 @@ public:
 protected:
     void mapExternalTextureBuffer(const sp<GraphicBuffer>& buffer, bool isRenderable) override;
     void unmapExternalTextureBuffer(const sp<GraphicBuffer>& buffer) override;
+    bool canSkipPostRenderCleanup() const override;
 
 private:
     void threadMain(CreateInstanceFactory factory);
@@ -84,9 +85,10 @@ private:
     // Protects the creation and destruction of mThread.
     mutable std::mutex mThreadMutex;
     std::thread mThread GUARDED_BY(mThreadMutex);
-    bool mRunning GUARDED_BY(mThreadMutex) = true;
-    mutable std::queue<std::function<void(renderengine::RenderEngine& instance)>> mFunctionCalls
-            GUARDED_BY(mThreadMutex);
+    std::atomic<bool> mRunning = true;
+
+    using Work = std::function<void(renderengine::RenderEngine&)>;
+    mutable std::queue<Work> mFunctionCalls GUARDED_BY(mThreadMutex);
     mutable std::condition_variable mCondition;
 
     // Used to allow select thread safe methods to be accessed without requiring the
@@ -99,6 +101,7 @@ private:
      * Render Engine
      */
     std::unique_ptr<renderengine::RenderEngine> mRenderEngine;
+    std::atomic<bool> mIsProtected = false;
 };
 } // namespace threaded
 } // namespace renderengine

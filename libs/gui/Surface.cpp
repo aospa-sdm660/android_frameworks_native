@@ -1254,6 +1254,10 @@ void Surface::querySupportedTimestampsLocked() const {
 int Surface::query(int what, int* value) const {
     ATRACE_CALL();
     ALOGV("Surface::query");
+    if ((what == NATIVE_WINDOW_WIDTH) || (what == NATIVE_WINDOW_HEIGHT)) {
+        return mGraphicBufferProducer->query(what, value);
+    }
+
     { // scope for the lock
         Mutex::Autolock lock(mMutex);
         switch (what) {
@@ -1500,9 +1504,6 @@ int Surface::perform(int operation, va_list args)
         break;
     case NATIVE_WINDOW_SET_FRAME_TIMELINE_INFO:
         res = dispatchSetFrameTimelineInfo(args);
-        break;
-    case NATIVE_WINDOW_GET_EXTRA_BUFFER_COUNT:
-        res = dispatchGetExtraBufferCount(args);
         break;
     default:
         res = NAME_NOT_FOUND;
@@ -1851,14 +1852,6 @@ int Surface::dispatchSetFrameTimelineInfo(va_list args) {
 
     ALOGV("Surface::%s", __func__);
     return setFrameTimelineInfo({frameTimelineVsyncId, inputEventId});
-}
-
-int Surface::dispatchGetExtraBufferCount(va_list args) {
-    ATRACE_CALL();
-    auto extraBuffers = static_cast<int*>(va_arg(args, int*));
-
-    ALOGV("Surface::dispatchGetExtraBufferCount");
-    return getExtraBufferCount(extraBuffers);
 }
 
 bool Surface::transformToDisplayInverse() const {
@@ -2630,10 +2623,6 @@ status_t Surface::setFrameRate(float frameRate, int8_t compatibility,
 
 status_t Surface::setFrameTimelineInfo(const FrameTimelineInfo& frameTimelineInfo) {
     return composerService()->setFrameTimelineInfo(mGraphicBufferProducer, frameTimelineInfo);
-}
-
-status_t Surface::getExtraBufferCount(int* extraBuffers) const {
-    return composerService()->getExtraBufferCount(extraBuffers);
 }
 
 }; // namespace android

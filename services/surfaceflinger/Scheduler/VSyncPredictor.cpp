@@ -69,7 +69,21 @@ bool VSyncPredictor::validate(nsecs_t timestamp) const {
 
     auto const aValidTimestamp = mTimestamps[mLastTimestampIndex];
     auto const percent = (timestamp - aValidTimestamp) % mIdealPeriod * kMaxPercent / mIdealPeriod;
-    return percent < kOutlierTolerancePercent || percent > (kMaxPercent - kOutlierTolerancePercent);
+    if (percent >= kOutlierTolerancePercent &&
+        percent <= (kMaxPercent - kOutlierTolerancePercent)) {
+        return false;
+    }
+
+    const auto iter = std::min_element(mTimestamps.begin(), mTimestamps.end(),
+                                       [timestamp](nsecs_t a, nsecs_t b) {
+                                           return std::abs(timestamp - a) < std::abs(timestamp - b);
+                                       });
+    const auto distancePercent = std::abs(*iter - timestamp) * kMaxPercent / mIdealPeriod;
+    if (distancePercent < kOutlierTolerancePercent) {
+        // duplicate timestamp
+        return false;
+    }
+    return true;
 }
 
 nsecs_t VSyncPredictor::currentPeriod() const {
@@ -86,6 +100,9 @@ bool VSyncPredictor::addVsyncTimestamp(nsecs_t timestamp) {
         // in the learning phase we should just clear all timestamps and start
         // over.
         if (mTimestamps.size() < kMinimumSamplesForPrediction) {
+            // Add the timestamp to mTimestamps before clearing it so we could
+            // update mKnownTimestamp based on the new timestamp.
+            mTimestamps.push_back(timestamp);
             clearTimestamps();
         } else if (!mTimestamps.empty()) {
             mKnownTimestamp =

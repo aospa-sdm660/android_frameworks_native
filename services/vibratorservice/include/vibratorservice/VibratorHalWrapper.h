@@ -42,7 +42,10 @@ public:
     static HalResult<T> unsupported() { return HalResult("", /* unsupported= */ true); }
 
     static HalResult<T> fromStatus(binder::Status status, T data) {
-        if (status.exceptionCode() == binder::Status::EX_UNSUPPORTED_OPERATION) {
+        if (status.exceptionCode() == binder::Status::EX_UNSUPPORTED_OPERATION ||
+            status.transactionError() == android::UNKNOWN_TRANSACTION) {
+            // UNKNOWN_TRANSACTION means the HAL implementation is an older version, so this is
+            // the same as the operation being unsupported by this HAL. Should not retry.
             return HalResult<T>::unsupported();
         }
         if (status.isOk()) {
@@ -179,6 +182,10 @@ public:
     const HalResult<std::vector<hardware::vibrator::Braking>> supportedBraking;
     const HalResult<std::vector<hardware::vibrator::CompositePrimitive>> supportedPrimitives;
     const HalResult<std::vector<std::chrono::milliseconds>> primitiveDurations;
+    const HalResult<std::chrono::milliseconds> primitiveDelayMax;
+    const HalResult<std::chrono::milliseconds> pwlePrimitiveDurationMax;
+    const HalResult<int32_t> compositionSizeMax;
+    const HalResult<int32_t> pwleSizeMax;
     const HalResult<float> minFrequency;
     const HalResult<float> resonantFrequency;
     const HalResult<float> frequencyResolution;
@@ -191,6 +198,10 @@ public:
                 supportedBraking.checkAndLogFailure("getSupportedBraking") ||
                 supportedPrimitives.checkAndLogFailure("getSupportedPrimitives") ||
                 primitiveDurations.checkAndLogFailure("getPrimitiveDuration") ||
+                primitiveDelayMax.checkAndLogFailure("getPrimitiveDelayMax") ||
+                pwlePrimitiveDurationMax.checkAndLogFailure("getPwlePrimitiveDurationMax") ||
+                compositionSizeMax.checkAndLogFailure("getCompositionSizeMax") ||
+                pwleSizeMax.checkAndLogFailure("getPwleSizeMax") ||
                 minFrequency.checkAndLogFailure("getMinFrequency") ||
                 resonantFrequency.checkAndLogFailure("getResonantFrequency") ||
                 frequencyResolution.checkAndLogFailure("getFrequencyResolution") ||
@@ -202,9 +213,19 @@ public:
 class InfoCache {
 public:
     Info get() {
-        return {mCapabilities,        mSupportedEffects,    mSupportedBraking,
-                mSupportedPrimitives, mPrimitiveDurations,  mMinFrequency,
-                mResonantFrequency,   mFrequencyResolution, mQFactor,
+        return {mCapabilities,
+                mSupportedEffects,
+                mSupportedBraking,
+                mSupportedPrimitives,
+                mPrimitiveDurations,
+                mPrimitiveDelayMax,
+                mPwlePrimitiveDurationMax,
+                mCompositionSizeMax,
+                mPwleSizeMax,
+                mMinFrequency,
+                mResonantFrequency,
+                mFrequencyResolution,
+                mQFactor,
                 mMaxAmplitudes};
     }
 
@@ -219,6 +240,12 @@ private:
             HalResult<std::vector<hardware::vibrator::CompositePrimitive>>::failed(MSG);
     HalResult<std::vector<std::chrono::milliseconds>> mPrimitiveDurations =
             HalResult<std::vector<std::chrono::milliseconds>>::failed(MSG);
+    HalResult<std::chrono::milliseconds> mPrimitiveDelayMax =
+            HalResult<std::chrono::milliseconds>::failed(MSG);
+    HalResult<std::chrono::milliseconds> mPwlePrimitiveDurationMax =
+            HalResult<std::chrono::milliseconds>::failed(MSG);
+    HalResult<int32_t> mCompositionSizeMax = HalResult<int>::failed(MSG);
+    HalResult<int32_t> mPwleSizeMax = HalResult<int>::failed(MSG);
     HalResult<float> mMinFrequency = HalResult<float>::failed(MSG);
     HalResult<float> mResonantFrequency = HalResult<float>::failed(MSG);
     HalResult<float> mFrequencyResolution = HalResult<float>::failed(MSG);
@@ -282,6 +309,10 @@ protected:
     getSupportedPrimitivesInternal();
     virtual HalResult<std::vector<std::chrono::milliseconds>> getPrimitiveDurationsInternal(
             const std::vector<hardware::vibrator::CompositePrimitive>& supportedPrimitives);
+    virtual HalResult<std::chrono::milliseconds> getPrimitiveDelayMaxInternal();
+    virtual HalResult<std::chrono::milliseconds> getPrimitiveDurationMaxInternal();
+    virtual HalResult<int32_t> getCompositionSizeMaxInternal();
+    virtual HalResult<int32_t> getPwleSizeMaxInternal();
     virtual HalResult<float> getMinFrequencyInternal();
     virtual HalResult<float> getResonantFrequencyInternal();
     virtual HalResult<float> getFrequencyResolutionInternal();
@@ -344,6 +375,10 @@ protected:
     HalResult<std::vector<std::chrono::milliseconds>> getPrimitiveDurationsInternal(
             const std::vector<hardware::vibrator::CompositePrimitive>& supportedPrimitives)
             override final;
+    HalResult<std::chrono::milliseconds> getPrimitiveDelayMaxInternal() override final;
+    HalResult<std::chrono::milliseconds> getPrimitiveDurationMaxInternal() override final;
+    HalResult<int32_t> getCompositionSizeMaxInternal() override final;
+    HalResult<int32_t> getPwleSizeMaxInternal() override final;
     HalResult<float> getMinFrequencyInternal() override final;
     HalResult<float> getResonantFrequencyInternal() override final;
     HalResult<float> getFrequencyResolutionInternal() override final;

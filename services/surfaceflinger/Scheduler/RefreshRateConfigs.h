@@ -53,7 +53,7 @@ class RefreshRateConfigs {
 public:
     // Margin used when matching refresh rates to the content desired ones.
     static constexpr nsecs_t MARGIN_FOR_PERIOD_CALCULATION =
-        std::chrono::nanoseconds(800us).count();
+            std::chrono::nanoseconds(800us).count();
 
     class RefreshRate {
     private:
@@ -250,6 +250,10 @@ public:
         bool touch = false;
         // True if the system hasn't seen any buffers posted to layers recently.
         bool idle = false;
+
+        bool operator==(const GlobalSignals& other) const {
+            return touch == other.touch && idle == other.idle;
+        }
     };
 
     // Returns the refresh rate that fits best to the given layers.
@@ -301,8 +305,19 @@ public:
     // Returns a known frame rate that is the closest to frameRate
     Fps findClosestKnownFrameRate(Fps frameRate) const;
 
+    // Configuration flags.
+    struct Config {
+        bool enableFrameRateOverride = false;
+
+        // Specifies the upper refresh rate threshold (inclusive) for layer vote types of multiple
+        // or heuristic, such that refresh rates higher than this value will not be voted for. 0 if
+        // no threshold is set.
+        int frameRateMultipleThreshold = 0;
+    };
+
     RefreshRateConfigs(const DisplayModes& modes, DisplayModeId currentModeId,
-                       bool enableFrameRateOverride = false);
+                       Config config = {.enableFrameRateOverride = false,
+                                        .frameRateMultipleThreshold = 0});
 
     void updateDisplayModes(const DisplayModes& mode, DisplayModeId currentModeId) EXCLUDES(mLock);
 
@@ -314,10 +329,8 @@ public:
         return mRefreshRates.size() > 1;
     }
 
-    // Class to enumerate options around toggling the kernel timer on and off. We have an option
-    // for no change to avoid extra calls to kernel.
+    // Class to enumerate options around toggling the kernel timer on and off.
     enum class KernelIdleTimerAction {
-        NoChange, // Do not change the idle timer.
         TurnOff,  // Turn off the idle timer.
         TurnOn    // Turn on the idle timer.
     };
@@ -353,6 +366,15 @@ private:
             const std::function<bool(const RefreshRate&)>& shouldAddRefreshRate,
             std::vector<const RefreshRate*>* outRefreshRates) REQUIRES(mLock);
 
+    std::optional<RefreshRate> getCachedBestRefreshRate(const std::vector<LayerRequirement>& layers,
+                                                        const GlobalSignals& globalSignals,
+                                                        GlobalSignals* outSignalsConsidered) const
+            REQUIRES(mLock);
+
+    RefreshRate getBestRefreshRateLocked(const std::vector<LayerRequirement>& layers,
+                                         const GlobalSignals& globalSignals,
+                                         GlobalSignals* outSignalsConsidered) const REQUIRES(mLock);
+
     // Returns the refresh rate with the highest score in the collection specified from begin
     // to end. If there are more than one with the same highest refresh rate, the first one is
     // returned.
@@ -377,6 +399,9 @@ private:
 
     const Policy* getCurrentPolicyLocked() const REQUIRES(mLock);
     bool isPolicyValidLocked(const Policy& policy) const REQUIRES(mLock);
+
+    // Returns whether the layer is allowed to vote for the given refresh rate.
+    bool isVoteAllowed(const LayerRequirement&, const RefreshRate&) const;
 
     // calculates a score for a layer. Used to determine the display refresh rate
     // and the frame rate override for certains applications.
@@ -415,8 +440,17 @@ private:
     // from based on the closest value.
     const std::vector<Fps> mKnownFrameRates;
 
-    const bool mEnableFrameRateOverride;
+    const Config mConfig;
     bool mSupportsFrameRateOverride;
+
+    struct GetBestRefreshRateInvocation {
+        std::vector<LayerRequirement> layerRequirements;
+        GlobalSignals globalSignals;
+        GlobalSignals outSignalsConsidered;
+        RefreshRate resultingBestRefreshRate;
+    };
+    mutable std::optional<GetBestRefreshRateInvocation> lastBestRefreshRateInvocation
+            GUARDED_BY(mLock);
 };
 
 } // namespace android::scheduler

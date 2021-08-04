@@ -16,18 +16,10 @@
 
 #pragma once
 
-// TODO(b/129481165): remove the #pragma below and fix conversion issues
 #include <cstdint>
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wconversion"
-#pragma clang diagnostic ignored "-Wextra"
-
-#include <android/hardware/graphics/composer/2.4/IComposerClient.h>
-
-// TODO(b/129481165): remove the #pragma below and fix conversion issues
-#pragma clang diagnostic pop // ignored "-Wconversion -Wextra"
 
 #include <../Fps.h>
+#include <android/hardware/graphics/composer/2.4/IComposerClient.h>
 #include <gui/JankInfo.h>
 #include <timestatsproto/TimeStatsHelper.h>
 #include <timestatsproto/TimeStatsProtoHeader.h>
@@ -87,7 +79,7 @@ public:
                                             const std::shared_ptr<FenceTime>& readyFence) = 0;
 
     virtual void setPostTime(int32_t layerId, uint64_t frameNumber, const std::string& layerName,
-                             uid_t uid, nsecs_t postTime) = 0;
+                             uid_t uid, nsecs_t postTime, int32_t gameMode) = 0;
     virtual void setLatchTime(int32_t layerId, uint64_t frameNumber, nsecs_t latchTime) = 0;
     // Reasons why latching a particular buffer may be skipped
     enum class LatchSkipReason {
@@ -109,11 +101,11 @@ public:
     // rendering path, as they flush prior fences if those fences have fired.
     virtual void setPresentTime(int32_t layerId, uint64_t frameNumber, nsecs_t presentTime,
                                 Fps displayRefreshRate, std::optional<Fps> renderRate,
-                                SetFrameRateVote frameRateVote) = 0;
+                                SetFrameRateVote frameRateVote, int32_t gameMode) = 0;
     virtual void setPresentFence(int32_t layerId, uint64_t frameNumber,
                                  const std::shared_ptr<FenceTime>& presentFence,
                                  Fps displayRefreshRate, std::optional<Fps> renderRate,
-                                 SetFrameRateVote frameRateVote) = 0;
+                                 SetFrameRateVote frameRateVote, int32_t gameMode) = 0;
 
     // Increments janky frames, blamed to the provided {refreshRate, renderRate, uid, layerName}
     // key, with JankMetadata as supplementary reasons for the jank. Because FrameTimeline is the
@@ -131,6 +123,7 @@ public:
         std::optional<Fps> renderRate;
         uid_t uid = 0;
         std::string layerName;
+        int32_t gameMode = 0;
         int32_t reasons = 0;
         nsecs_t displayDeadlineDelta = 0;
         nsecs_t displayPresentJitter = 0;
@@ -141,8 +134,8 @@ public:
                     ((renderRate == std::nullopt && o.renderRate == std::nullopt) ||
                      (renderRate != std::nullopt && o.renderRate != std::nullopt &&
                       Fps::EqualsInBuckets{}(*renderRate, *o.renderRate))) &&
-                    uid == o.uid && layerName == o.layerName && reasons == o.reasons &&
-                    displayDeadlineDelta == o.displayDeadlineDelta &&
+                    uid == o.uid && layerName == o.layerName && gameMode == o.gameMode &&
+                    reasons == o.reasons && displayDeadlineDelta == o.displayDeadlineDelta &&
                     displayPresentJitter == o.displayPresentJitter &&
                     appDeadlineDelta == o.appDeadlineDelta;
         }
@@ -199,6 +192,7 @@ class TimeStats : public android::TimeStats {
     struct LayerRecord {
         uid_t uid;
         std::string layerName;
+        int32_t gameMode = 0;
         // This is the index in timeRecords, at which the timestamps for that
         // specific frame are still not fully received. This is not waiting for
         // fences to signal, but rather waiting to receive those fences/timestamps.
@@ -251,7 +245,7 @@ public:
                                     const std::shared_ptr<FenceTime>& readyFence) override;
 
     void setPostTime(int32_t layerId, uint64_t frameNumber, const std::string& layerName, uid_t uid,
-                     nsecs_t postTime) override;
+                     nsecs_t postTime, int32_t gameMode) override;
     void setLatchTime(int32_t layerId, uint64_t frameNumber, nsecs_t latchTime) override;
     void incrementLatchSkipped(int32_t layerId, LatchSkipReason reason) override;
     void incrementBadDesiredPresent(int32_t layerId) override;
@@ -261,10 +255,11 @@ public:
                          const std::shared_ptr<FenceTime>& acquireFence) override;
     void setPresentTime(int32_t layerId, uint64_t frameNumber, nsecs_t presentTime,
                         Fps displayRefreshRate, std::optional<Fps> renderRate,
-                        SetFrameRateVote frameRateVote) override;
+                        SetFrameRateVote frameRateVote, int32_t gameMode) override;
     void setPresentFence(int32_t layerId, uint64_t frameNumber,
                          const std::shared_ptr<FenceTime>& presentFence, Fps displayRefreshRate,
-                         std::optional<Fps> renderRate, SetFrameRateVote frameRateVote) override;
+                         std::optional<Fps> renderRate, SetFrameRateVote frameRateVote,
+                         int32_t gameMode) override;
 
     void incrementJankyFrames(const JankyFramesInfo& info) override;
     // Clean up the layer record
@@ -286,10 +281,10 @@ private:
     bool recordReadyLocked(int32_t layerId, TimeRecord* timeRecord);
     void flushAvailableRecordsToStatsLocked(int32_t layerId, Fps displayRefreshRate,
                                             std::optional<Fps> renderRate,
-                                            SetFrameRateVote frameRateVote);
+                                            SetFrameRateVote frameRateVote, int32_t gameMode);
     void flushPowerTimeLocked();
     void flushAvailableGlobalRecordsToStatsLocked();
-    bool canAddNewAggregatedStats(uid_t uid, const std::string& layerName);
+    bool canAddNewAggregatedStats(uid_t uid, const std::string& layerName, int32_t gameMode);
 
     void enable();
     void disable();

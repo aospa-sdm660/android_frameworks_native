@@ -24,6 +24,7 @@
 
 #include <android-base/stringprintf.h>
 #include <private/gui/SyncFeatures.h>
+#include <processgroup/processgroup.h>
 #include <utils/Trace.h>
 
 #include "gl/GLESRenderEngine.h"
@@ -48,11 +49,8 @@ RenderEngineThreaded::RenderEngineThreaded(CreateInstanceFactory factory, Render
 }
 
 RenderEngineThreaded::~RenderEngineThreaded() {
-    {
-        std::lock_guard lock(mThreadMutex);
-        mRunning = false;
-        mCondition.notify_one();
-    }
+    mRunning = false;
+    mCondition.notify_one();
 
     if (mThread.joinable()) {
         mThread.join();
@@ -83,27 +81,43 @@ status_t RenderEngineThreaded::setSchedFifo(bool enabled) {
 void RenderEngineThreaded::threadMain(CreateInstanceFactory factory) NO_THREAD_SAFETY_ANALYSIS {
     ATRACE_CALL();
 
+    if (!SetTaskProfiles(0, {"SFRenderEnginePolicy"})) {
+        ALOGW("Failed to set render-engine task profile!");
+    }
+
     if (setSchedFifo(true) != NO_ERROR) {
         ALOGW("Couldn't set SCHED_FIFO");
     }
 
     mRenderEngine = factory();
+    mIsProtected = mRenderEngine->isProtected();
 
-    std::unique_lock<std::mutex> lock(mThreadMutex);
     pthread_setname_np(pthread_self(), mThreadName);
 
     {
-        std::unique_lock<std::mutex> lock(mInitializedMutex);
+        std::scoped_lock lock(mInitializedMutex);
         mIsInitialized = true;
     }
     mInitializedCondition.notify_all();
 
     while (mRunning) {
-        if (!mFunctionCalls.empty()) {
-            auto task = mFunctionCalls.front();
-            mFunctionCalls.pop();
-            task(*mRenderEngine);
+        const auto getNextTask = [this]() -> std::optional<Work> {
+            std::scoped_lock lock(mThreadMutex);
+            if (!mFunctionCalls.empty()) {
+                Work task = mFunctionCalls.front();
+                mFunctionCalls.pop();
+                return std::make_optional<Work>(task);
+            }
+            return std::nullopt;
+        };
+
+        const auto task = getNextTask();
+
+        if (task) {
+            (*task)(*mRenderEngine);
         }
+
+        std::unique_lock<std::mutex> lock(mThreadMutex);
         mCondition.wait(lock, [this]() REQUIRES(mThreadMutex) {
             return !mRunning || !mFunctionCalls.empty();
         });
@@ -235,10 +249,8 @@ size_t RenderEngineThreaded::getMaxViewportDims() const {
 
 bool RenderEngineThreaded::isProtected() const {
     waitUntilInitialized();
-    // ensure that useProtectedContext is not currently being changed by some
-    // other thread.
     std::lock_guard lock(mThreadMutex);
-    return mRenderEngine->isProtected();
+    return mIsProtected;
 }
 
 bool RenderEngineThreaded::supportsProtectedContent() const {
@@ -246,35 +258,50 @@ bool RenderEngineThreaded::supportsProtectedContent() const {
     return mRenderEngine->supportsProtectedContent();
 }
 
-bool RenderEngineThreaded::useProtectedContext(bool useProtectedContext) {
-    std::promise<bool> resultPromise;
-    std::future<bool> resultFuture = resultPromise.get_future();
+void RenderEngineThreaded::useProtectedContext(bool useProtectedContext) {
+    if (isProtected() == useProtectedContext ||
+        (useProtectedContext && !supportsProtectedContent())) {
+        return;
+    }
+
     {
         std::lock_guard lock(mThreadMutex);
-        mFunctionCalls.push(
-                [&resultPromise, useProtectedContext](renderengine::RenderEngine& instance) {
-                    ATRACE_NAME("REThreaded::useProtectedContext");
-                    bool returnValue = instance.useProtectedContext(useProtectedContext);
-                    resultPromise.set_value(returnValue);
-                });
+        mFunctionCalls.push([useProtectedContext, this](renderengine::RenderEngine& instance) {
+            ATRACE_NAME("REThreaded::useProtectedContext");
+            instance.useProtectedContext(useProtectedContext);
+            if (instance.isProtected() != useProtectedContext) {
+                ALOGE("Failed to switch RenderEngine context.");
+                // reset the cached mIsProtected value to a good state, but this does not
+                // prevent other callers of this method and isProtected from reading the
+                // invalid cached value.
+                mIsProtected = instance.isProtected();
+            }
+        });
+        mIsProtected = useProtectedContext;
     }
     mCondition.notify_one();
-    return resultFuture.get();
 }
 
-bool RenderEngineThreaded::cleanupPostRender(CleanupMode mode) {
-    std::promise<bool> resultPromise;
-    std::future<bool> resultFuture = resultPromise.get_future();
+void RenderEngineThreaded::cleanupPostRender() {
+    if (canSkipPostRenderCleanup()) {
+        return;
+    }
+
+    // This function is designed so it can run asynchronously, so we do not need to wait
+    // for the futures.
     {
         std::lock_guard lock(mThreadMutex);
-        mFunctionCalls.push([&resultPromise, mode](renderengine::RenderEngine& instance) {
-            ATRACE_NAME("REThreaded::cleanupPostRender");
-            bool returnValue = instance.cleanupPostRender(mode);
-            resultPromise.set_value(returnValue);
+        mFunctionCalls.push([=](renderengine::RenderEngine& instance) {
+            ATRACE_NAME("REThreaded::unmapExternalTextureBuffer");
+            instance.cleanupPostRender();
         });
     }
     mCondition.notify_one();
-    return resultFuture.get();
+}
+
+bool RenderEngineThreaded::canSkipPostRenderCleanup() const {
+    waitUntilInitialized();
+    return mRenderEngine->canSkipPostRenderCleanup();
 }
 
 void RenderEngineThreaded::setViewportAndProjection(Rect viewPort, Rect sourceCrop) {

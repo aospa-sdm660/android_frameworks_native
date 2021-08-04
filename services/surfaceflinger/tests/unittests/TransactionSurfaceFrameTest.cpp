@@ -45,7 +45,7 @@ public:
                 ::testing::UnitTest::GetInstance()->current_test_info();
         ALOGD("**** Setting up for %s.%s\n", test_info->test_case_name(), test_info->name());
         setupScheduler();
-        setupComposer(0);
+        mFlinger.setupComposer(std::make_unique<Hwc2::mock::Composer>());
     }
 
     ~TransactionSurfaceFrameTest() {
@@ -62,7 +62,7 @@ public:
     }
 
     void commitTransaction(Layer* layer) {
-        auto c = layer->getCurrentState();
+        auto c = layer->getDrawingState();
         layer->commitTransaction(c);
     }
 
@@ -91,17 +91,9 @@ public:
                                 std::move(eventThread), std::move(sfEventThread));
     }
 
-    void setupComposer(uint32_t virtualDisplayCount) {
-        mComposer = new Hwc2::mock::Composer();
-        EXPECT_CALL(*mComposer, getMaxVirtualDisplayCount()).WillOnce(Return(virtualDisplayCount));
-        mFlinger.setupComposer(std::unique_ptr<Hwc2::Composer>(mComposer));
-
-        Mock::VerifyAndClear(mComposer);
-    }
-
     TestableSurfaceFlinger mFlinger;
-    Hwc2::mock::Composer* mComposer = nullptr;
     renderengine::mock::RenderEngine mRenderEngine;
+
     FenceToFenceTimeMap fenceFactory;
     client_cache_t mClientCache;
 
@@ -109,9 +101,9 @@ public:
         sp<BufferStateLayer> layer = createBufferStateLayer();
         layer->setFrameTimelineVsyncForBufferlessTransaction({/*vsyncId*/ 1, /*inputEventId*/ 0},
                                                              10);
-        EXPECT_EQ(1u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
-        ASSERT_TRUE(layer->mCurrentState.bufferSurfaceFrameTX == nullptr);
-        const auto surfaceFrame = layer->mCurrentState.bufferlessSurfaceFramesTX.at(/*token*/ 1);
+        EXPECT_EQ(1u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
+        ASSERT_TRUE(layer->mDrawingState.bufferSurfaceFrameTX == nullptr);
+        const auto surfaceFrame = layer->mDrawingState.bufferlessSurfaceFramesTX.at(/*token*/ 1);
         commitTransaction(layer.get());
         EXPECT_EQ(1, surfaceFrame->getToken());
         EXPECT_EQ(false, surfaceFrame->getIsBuffer());
@@ -131,9 +123,9 @@ public:
         acquireFence->signalForTest(12);
 
         commitTransaction(layer.get());
-        EXPECT_EQ(0u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
-        ASSERT_NE(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
-        const auto& surfaceFrame = layer->mCurrentState.bufferSurfaceFrameTX;
+        EXPECT_EQ(0u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
+        ASSERT_NE(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
+        const auto surfaceFrame = layer->mDrawingState.bufferSurfaceFrameTX;
         // Buffers are presented only at latch time.
         EXPECT_EQ(PresentState::Unknown, surfaceFrame->getPresentState());
 
@@ -156,9 +148,9 @@ public:
                                                mRenderEngine, false);
         layer->setBuffer(buffer1, fence1, 10, 20, false, mClientCache, 1, std::nullopt,
                          {/*vsyncId*/ 1, /*inputEventId*/ 0}, nullptr /* releaseBufferCallback */);
-        EXPECT_EQ(0u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
-        ASSERT_NE(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
-        const auto droppedSurfaceFrame = layer->mCurrentState.bufferSurfaceFrameTX;
+        EXPECT_EQ(0u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
+        ASSERT_NE(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
+        const auto droppedSurfaceFrame = layer->mDrawingState.bufferSurfaceFrameTX;
 
         sp<Fence> fence2(new Fence());
         auto acquireFence2 = fenceFactory.createFenceTimeForTest(fence2);
@@ -172,9 +164,9 @@ public:
         nsecs_t end = systemTime();
         acquireFence2->signalForTest(12);
 
-        EXPECT_EQ(0u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
-        ASSERT_NE(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
-        const auto& presentedSurfaceFrame = layer->mCurrentState.bufferSurfaceFrameTX;
+        EXPECT_EQ(0u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
+        ASSERT_NE(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
+        const auto presentedSurfaceFrame = layer->mDrawingState.bufferSurfaceFrameTX;
 
         commitTransaction(layer.get());
         bool computeVisisbleRegions;
@@ -198,8 +190,8 @@ public:
         layer->setFrameTimelineVsyncForBufferlessTransaction({/*vsyncId*/ 1, /*inputEventId*/ 0},
                                                              10);
 
-        EXPECT_EQ(1u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
-        ASSERT_EQ(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
+        EXPECT_EQ(1u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
+        ASSERT_EQ(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
 
         sp<Fence> fence(new Fence());
         auto acquireFence = fenceFactory.createFenceTimeForTest(fence);
@@ -211,9 +203,9 @@ public:
                          {/*vsyncId*/ 1, /*inputEventId*/ 0}, nullptr /* releaseBufferCallback */);
         acquireFence->signalForTest(12);
 
-        EXPECT_EQ(0u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
-        ASSERT_NE(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
-        const auto& surfaceFrame = layer->mCurrentState.bufferSurfaceFrameTX;
+        EXPECT_EQ(0u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
+        ASSERT_NE(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
+        const auto surfaceFrame = layer->mDrawingState.bufferSurfaceFrameTX;
 
         commitTransaction(layer.get());
         EXPECT_EQ(1, surfaceFrame->getToken());
@@ -237,29 +229,29 @@ public:
                                                mRenderEngine, false);
         layer->setBuffer(buffer, fence, 10, 20, false, mClientCache, 1, std::nullopt,
                          {/*vsyncId*/ 1, /*inputEventId*/ 0}, nullptr /* releaseBufferCallback */);
-        EXPECT_EQ(0u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
-        ASSERT_NE(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
+        EXPECT_EQ(0u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
+        ASSERT_NE(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
 
         layer->setFrameTimelineVsyncForBufferlessTransaction({/*vsyncId*/ 1, /*inputEventId*/ 0},
                                                              10);
-        EXPECT_EQ(0u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
-        ASSERT_NE(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
+        EXPECT_EQ(0u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
+        ASSERT_NE(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
     }
 
     void MultipleSurfaceFramesPresentedTogether() {
         sp<BufferStateLayer> layer = createBufferStateLayer();
         layer->setFrameTimelineVsyncForBufferlessTransaction({/*vsyncId*/ 1, /*inputEventId*/ 0},
                                                              10);
-        EXPECT_EQ(1u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
-        ASSERT_EQ(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
+        EXPECT_EQ(1u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
+        ASSERT_EQ(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
         const auto bufferlessSurfaceFrame1 =
-                layer->mCurrentState.bufferlessSurfaceFramesTX.at(/*token*/ 1);
+                layer->mDrawingState.bufferlessSurfaceFramesTX.at(/*token*/ 1);
 
         layer->setFrameTimelineVsyncForBufferlessTransaction({/*vsyncId*/ 4, /*inputEventId*/ 0},
                                                              10);
-        EXPECT_EQ(2u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
-        ASSERT_EQ(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
-        const auto bufferlessSurfaceFrame2 = layer->mCurrentState.bufferlessSurfaceFramesTX[4];
+        EXPECT_EQ(2u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
+        ASSERT_EQ(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
+        const auto bufferlessSurfaceFrame2 = layer->mDrawingState.bufferlessSurfaceFramesTX[4];
 
         sp<Fence> fence(new Fence());
         auto acquireFence = fenceFactory.createFenceTimeForTest(fence);
@@ -269,9 +261,9 @@ public:
                                                mRenderEngine, false);
         layer->setBuffer(buffer, fence, 10, 20, false, mClientCache, 1, std::nullopt,
                          {/*vsyncId*/ 3, /*inputEventId*/ 0}, nullptr /* releaseBufferCallback */);
-        EXPECT_EQ(2u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
-        ASSERT_NE(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
-        const auto& bufferSurfaceFrameTX = layer->mCurrentState.bufferSurfaceFrameTX;
+        EXPECT_EQ(2u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
+        ASSERT_NE(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
+        const auto bufferSurfaceFrameTX = layer->mDrawingState.bufferSurfaceFrameTX;
 
         acquireFence->signalForTest(12);
 
@@ -307,8 +299,8 @@ public:
                                                mRenderEngine, false);
         layer->setBuffer(buffer1, fence1, 10, 20, false, mClientCache, 1, std::nullopt,
                          {/*vsyncId*/ 1, /*inputEventId*/ 0}, nullptr /* releaseBufferCallback */);
-        ASSERT_NE(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
-        const auto droppedSurfaceFrame = layer->mCurrentState.bufferSurfaceFrameTX;
+        ASSERT_NE(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
+        const auto droppedSurfaceFrame = layer->mDrawingState.bufferSurfaceFrameTX;
 
         sp<Fence> fence2(new Fence());
         auto acquireFence2 = fenceFactory.createFenceTimeForTest(fence2);
@@ -320,8 +312,8 @@ public:
                          {/*vsyncId*/ 1, /*inputEventId*/ 0}, nullptr /* releaseBufferCallback */);
         acquireFence2->signalForTest(12);
 
-        ASSERT_NE(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
-        auto& presentedSurfaceFrame = layer->mCurrentState.bufferSurfaceFrameTX;
+        ASSERT_NE(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
+        auto presentedSurfaceFrame = layer->mDrawingState.bufferSurfaceFrameTX;
 
         commitTransaction(layer.get());
         bool computeVisisbleRegions;
@@ -348,9 +340,9 @@ public:
                                                mRenderEngine, false);
         layer->setBuffer(buffer1, fence1, 10, 20, false, mClientCache, 1, std::nullopt,
                          {/*vsyncId*/ 1, /*inputEventId*/ 0}, nullptr /* releaseBufferCallback */);
-        EXPECT_EQ(0u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
-        ASSERT_NE(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
-        const auto droppedSurfaceFrame1 = layer->mCurrentState.bufferSurfaceFrameTX;
+        EXPECT_EQ(0u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
+        ASSERT_NE(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
+        const auto droppedSurfaceFrame1 = layer->mDrawingState.bufferSurfaceFrameTX;
 
         sp<Fence> fence2(new Fence());
         auto acquireFence2 = fenceFactory.createFenceTimeForTest(fence2);
@@ -363,9 +355,9 @@ public:
                          {/*vsyncId*/ FrameTimelineInfo::INVALID_VSYNC_ID, /*inputEventId*/ 0},
                          nullptr /* releaseBufferCallback */);
         auto dropEndTime1 = systemTime();
-        EXPECT_EQ(0u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
-        ASSERT_NE(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
-        const auto droppedSurfaceFrame2 = layer->mCurrentState.bufferSurfaceFrameTX;
+        EXPECT_EQ(0u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
+        ASSERT_NE(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
+        const auto droppedSurfaceFrame2 = layer->mDrawingState.bufferSurfaceFrameTX;
 
         sp<Fence> fence3(new Fence());
         auto acquireFence3 = fenceFactory.createFenceTimeForTest(fence3);
@@ -379,9 +371,9 @@ public:
         auto dropEndTime2 = systemTime();
         acquireFence3->signalForTest(12);
 
-        EXPECT_EQ(0u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
-        ASSERT_NE(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
-        const auto& presentedSurfaceFrame = layer->mCurrentState.bufferSurfaceFrameTX;
+        EXPECT_EQ(0u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
+        ASSERT_NE(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
+        const auto presentedSurfaceFrame = layer->mDrawingState.bufferSurfaceFrameTX;
 
         commitTransaction(layer.get());
         bool computeVisisbleRegions;
@@ -423,10 +415,10 @@ public:
             layer->setFrameTimelineVsyncForBufferlessTransaction({/*vsyncId*/ 2,
                                                                   /*inputEventId*/ 0},
                                                                  10);
-            ASSERT_NE(nullptr, layer->mCurrentState.bufferSurfaceFrameTX);
-            EXPECT_EQ(1u, layer->mCurrentState.bufferlessSurfaceFramesTX.size());
+            ASSERT_NE(nullptr, layer->mDrawingState.bufferSurfaceFrameTX);
+            EXPECT_EQ(1u, layer->mDrawingState.bufferlessSurfaceFramesTX.size());
             auto& bufferlessSurfaceFrame =
-                    layer->mCurrentState.bufferlessSurfaceFramesTX.at(/*vsyncId*/ 2);
+                    layer->mDrawingState.bufferlessSurfaceFramesTX.at(/*vsyncId*/ 2);
             bufferlessSurfaceFrames.push_back(bufferlessSurfaceFrame);
 
             commitTransaction(layer.get());

@@ -221,8 +221,18 @@ Rect OutputLayer::calculateOutputDisplayFrame() const {
 
     // reduce uses a FloatRect to provide more accuracy during the
     // transformation. We then round upon constructing 'frame'.
-    Rect frame{
-            layerTransform.transform(reduce(layerState.geomLayerBounds, activeTransparentRegion))};
+    FloatRect geomLayerBounds = layerState.geomLayerBounds;
+
+    // Some HWCs may clip client composited input to its displayFrame. Make sure
+    // that this does not cut off the shadow.
+    if (layerState.forceClientComposition && layerState.shadowRadius > 0.0f) {
+        const auto outset = layerState.shadowRadius;
+        geomLayerBounds.left -= outset;
+        geomLayerBounds.top -= outset;
+        geomLayerBounds.right += outset;
+        geomLayerBounds.bottom += outset;
+    }
+    Rect frame{layerTransform.transform(reduce(geomLayerBounds, activeTransparentRegion))};
     if (!frame.intersect(outputState.layerStackSpace.content, &frame)) {
         frame.clear();
     }
@@ -354,7 +364,7 @@ void OutputLayer::writeStateToHWC(bool includeGeometry, bool skipLayer, uint32_t
     }
 
     writeOutputDependentPerFrameStateToHWC(hwcLayer.get());
-    writeOutputIndependentPerFrameStateToHWC(hwcLayer.get(), *outputIndependentState);
+    writeOutputIndependentPerFrameStateToHWC(hwcLayer.get(), *outputIndependentState, skipLayer);
 
     writeCompositionTypeToHWC(hwcLayer.get(), requestedCompositionType, isPeekingThrough,
                               skipLayer);
@@ -476,7 +486,8 @@ void OutputLayer::writeOutputDependentPerFrameStateToHWC(HWC2::Layer* hwcLayer) 
 }
 
 void OutputLayer::writeOutputIndependentPerFrameStateToHWC(
-        HWC2::Layer* hwcLayer, const LayerFECompositionState& outputIndependentState) {
+        HWC2::Layer* hwcLayer, const LayerFECompositionState& outputIndependentState,
+        bool skipLayer) {
     switch (auto error = hwcLayer->setColorTransform(outputIndependentState.colorTransform)) {
         case hal::Error::NONE:
             break;
@@ -509,7 +520,7 @@ void OutputLayer::writeOutputIndependentPerFrameStateToHWC(
             break;
         case hal::Composition::CURSOR:
         case hal::Composition::DEVICE:
-            writeBufferStateToHWC(hwcLayer, outputIndependentState);
+            writeBufferStateToHWC(hwcLayer, outputIndependentState, skipLayer);
             break;
         case hal::Composition::INVALID:
         case hal::Composition::CLIENT:
@@ -552,7 +563,8 @@ void OutputLayer::writeSidebandStateToHWC(HWC2::Layer* hwcLayer,
 }
 
 void OutputLayer::writeBufferStateToHWC(HWC2::Layer* hwcLayer,
-                                        const LayerFECompositionState& outputIndependentState) {
+                                        const LayerFECompositionState& outputIndependentState,
+                                        bool skipLayer) {
     auto supportedPerFrameMetadata =
             getOutput().getDisplayColorProfile()->getSupportedPerFrameMetadata();
     if (auto error = hwcLayer->setPerFrameMetadata(supportedPerFrameMetadata,
@@ -565,7 +577,7 @@ void OutputLayer::writeBufferStateToHWC(HWC2::Layer* hwcLayer,
     sp<GraphicBuffer> buffer = outputIndependentState.buffer;
     sp<Fence> acquireFence = outputIndependentState.acquireFence;
     int slot = outputIndependentState.bufferSlot;
-    if (getState().overrideInfo.buffer != nullptr) {
+    if (getState().overrideInfo.buffer != nullptr && !skipLayer) {
         buffer = getState().overrideInfo.buffer->getBuffer();
         acquireFence = getState().overrideInfo.acquireFence;
         slot = HwcBufferCache::FLATTENER_CACHING_SLOT;

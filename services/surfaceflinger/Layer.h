@@ -1,3 +1,4 @@
+
 /*
  * Copyright (C) 2007 The Android Open Source Project
  *
@@ -185,7 +186,6 @@ public:
         float cornerRadius;
         int backgroundBlurRadius;
 
-        bool inputInfoChanged;
         InputWindowInfo inputInfo;
         wp<Layer> touchableRegionCrop;
 
@@ -737,8 +737,7 @@ public:
     void updateTransformHint(ui::Transform::RotationFlags);
 
     inline const State& getDrawingState() const { return mDrawingState; }
-    inline const State& getCurrentState() const { return mCurrentState; }
-    inline State& getCurrentState() { return mCurrentState; }
+    inline State& getDrawingState() { return mDrawingState; }
 
     LayerDebugInfo getLayerDebugInfo(const DisplayDevice*) const;
 
@@ -855,9 +854,9 @@ public:
     // Sets the parent's gameMode for this layer and all its children. Parent's gameMode is applied
     // only to layers that do not have the GAME_MODE_METADATA set by WMShell. Any layer(along with
     // its children) that has the metadata set will use the gameMode from the metadata.
-    void setGameModeForTree(int parentGameMode);
-    void setGameMode(int gameMode) { mGameMode = gameMode; };
-    int getGameMode() const { return mGameMode; }
+    void setGameModeForTree(int32_t parentGameMode);
+    void setGameMode(int32_t gameMode) { mGameMode = gameMode; };
+    int32_t getGameMode() const { return mGameMode; }
 
     virtual uid_t getOwnerUid() const { return mOwnerUid; }
 
@@ -869,6 +868,8 @@ public:
     // The layers in the cloned hierarchy will match the lifetime of the real layers. That is
     // if the real layer is destroyed, then the clone layer will also be destroyed.
     sp<Layer> mClonedChild;
+    bool mHadClonedChild = false;
+    void setClonedChild(const sp<Layer>& mClonedChild);
 
     mutable bool contentDirty{false};
     Region surfaceDamageRegion;
@@ -889,7 +890,7 @@ public:
     virtual bool setDestinationFrame(const Rect& /* destinationFrame */) { return false; }
     virtual std::atomic<int32_t>* getPendingBufferCounter() { return nullptr; }
     virtual std::string getPendingBufferCounterName() { return ""; }
-    virtual void updateGeometry() {}
+    virtual bool updateGeometry() { return false; }
 
 protected:
     friend class impl::SurfaceInterceptor;
@@ -907,7 +908,6 @@ protected:
             compositionengine::LayerFE::ClientCompositionTargetSettings&);
     virtual void preparePerFrameCompositionState();
     virtual void commitTransaction(State& stateToCommit);
-    virtual uint32_t doTransactionResize(uint32_t flags, Layer::State* stateToCommit);
     virtual void onSurfaceFrameCreated(const std::shared_ptr<frametimeline::SurfaceFrame>&) {}
 
     // Returns mCurrentScaling mode (originating from the
@@ -966,9 +966,11 @@ protected:
     // These are only accessed by the main thread or the tracing thread.
     State mDrawingState;
 
-    // these are protected by an external lock (mStateLock)
-    State mCurrentState;
-    std::atomic<uint32_t> mTransactionFlags{0};
+    uint32_t mTransactionFlags{0};
+    // Updated in doTransaction, used to track the last sequence number we
+    // committed. Currently this is really only used for updating visible
+    // regions.
+    int32_t mLastCommittedTxSequence = -1;
 
     // Timestamp history for UIAutomation. Thread safe.
     FrameTracker mFrameTracker;
@@ -993,7 +995,7 @@ protected:
     // Whether filtering is needed b/c of the drawingstate
     bool mNeedsFiltering{false};
 
-    std::atomic<bool> mRemovedFromCurrentState{false};
+    std::atomic<bool> mRemovedFromDrawingState{false};
 
     // page-flip thread (currently main thread)
     bool mProtectedByApp{false}; // application requires protected path to external sink
@@ -1006,16 +1008,11 @@ protected:
     // This layer can be a cursor on some displays.
     bool mPotentialCursor{false};
 
-    // Child list about to be committed/used for editing.
     LayerVector mCurrentChildren{LayerVector::StateSet::Current};
-    // Child list used for rendering.
     LayerVector mDrawingChildren{LayerVector::StateSet::Drawing};
 
     wp<Layer> mCurrentParent;
     wp<Layer> mDrawingParent;
-
-    // Can only be accessed with the SF state lock held.
-    bool mChildrenChanged{false};
 
     // Window types from WindowManager.LayoutParams
     const InputWindowInfo::Type mWindowType;
@@ -1032,7 +1029,7 @@ protected:
     // Used in buffer stuffing analysis in FrameTimeline.
     nsecs_t mLastLatchTime = 0;
 
-    mutable bool mCurrentStateModified = false;
+    mutable bool mDrawingStateModified = false;
 
 private:
     virtual void setTransformHint(ui::Transform::RotationFlags) {}
@@ -1066,6 +1063,10 @@ private:
     // Finds the top most layer in the hierarchy. This will find the root Layer where the parent is
     // null.
     sp<Layer> getRootLayer();
+
+    // Fills in the touch occlusion mode of the first parent (including this layer) that
+    // hasInputInfo() or no-op if no such parent is found.
+    void fillTouchOcclusionMode(InputWindowInfo& info);
 
     // Fills in the frame and transform info for the InputWindowInfo
     void fillInputFrameInfo(InputWindowInfo& info, const ui::Transform& toPhysicalDisplay);
@@ -1108,12 +1109,14 @@ private:
 
     // Game mode for the layer. Set by WindowManagerShell, game mode is used in
     // metrics(SurfaceFlingerStats).
-    int mGameMode = 0;
+    int32_t mGameMode = 0;
 
     mutable int32_t mPriority = Layer::PRIORITY_UNSET;
 
     // A list of regions on this layer that should have blurs.
     const std::vector<BlurRegion> getBlurRegions() const;
+public:
+    nsecs_t getPreviousGfxInfo();
 };
 
 std::ostream& operator<<(std::ostream& stream, const Layer::FrameRate& rate);

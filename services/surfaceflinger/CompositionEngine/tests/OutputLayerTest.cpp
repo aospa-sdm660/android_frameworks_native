@@ -324,6 +324,27 @@ TEST_F(OutputLayerDisplayFrameTest, outputTransformAffectsDisplayFrame) {
     EXPECT_THAT(calculateOutputDisplayFrame(), expected);
 }
 
+TEST_F(OutputLayerDisplayFrameTest, shadowExpandsDisplayFrame) {
+    const int kShadowRadius = 5;
+    mLayerFEState.shadowRadius = kShadowRadius;
+    mLayerFEState.forceClientComposition = true;
+
+    mLayerFEState.geomLayerBounds = FloatRect{100.f, 100.f, 200.f, 200.f};
+    Rect expected{mLayerFEState.geomLayerBounds};
+    expected.inset(-kShadowRadius, -kShadowRadius, -kShadowRadius, -kShadowRadius);
+    EXPECT_THAT(calculateOutputDisplayFrame(), expected);
+}
+
+TEST_F(OutputLayerDisplayFrameTest, shadowExpandsDisplayFrame_onlyIfForcingClientComposition) {
+    const int kShadowRadius = 5;
+    mLayerFEState.shadowRadius = kShadowRadius;
+    mLayerFEState.forceClientComposition = false;
+
+    mLayerFEState.geomLayerBounds = FloatRect{100.f, 100.f, 200.f, 200.f};
+    Rect expected{mLayerFEState.geomLayerBounds};
+    EXPECT_THAT(calculateOutputDisplayFrame(), expected);
+}
+
 /*
  * OutputLayer::calculateOutputRelativeBufferTransform()
  */
@@ -699,6 +720,7 @@ struct OutputLayerWriteStateToHWCTest : public OutputLayerTest {
             Hwc2::IComposerClient::BlendMode::PREMULTIPLIED;
     static constexpr float kAlpha = 51.f;
     static constexpr float kOverrideAlpha = 1.f;
+    static constexpr float kSkipAlpha = 0.f;
     static constexpr ui::Dataspace kDataspace = static_cast<ui::Dataspace>(71);
     static constexpr ui::Dataspace kOverrideDataspace = static_cast<ui::Dataspace>(72);
     static constexpr int kSupportedPerFrameMetadata = 101;
@@ -1052,6 +1074,22 @@ TEST_F(OutputLayerWriteStateToHWCTest, perFrameStateDoesNotIncludeMetadataIfPres
     EXPECT_CALL(*mLayerFE, hasRoundedCorners()).WillOnce(Return(false));
 
     mOutputLayer.writeStateToHWC(/*includeGeometry*/ false, /*skipLayer*/ false, 0,
+                                 /*zIsOverridden*/ false, /*isPeekingThrough*/ false);
+}
+
+TEST_F(OutputLayerWriteStateToHWCTest, overriddenSkipLayerDoesNotSendBuffer) {
+    mLayerFEState.compositionType = Hwc2::IComposerClient::Composition::DEVICE;
+    includeOverrideInfo();
+
+    expectGeometryCommonCalls(kOverrideDisplayFrame, kOverrideSourceCrop, kOverrideBufferTransform,
+                              kOverrideBlendMode, kSkipAlpha);
+    expectPerFrameCommonCalls(SimulateUnsupported::None, kOverrideDataspace, kOverrideVisibleRegion,
+                              kOverrideSurfaceDamage);
+    expectSetHdrMetadataAndBufferCalls();
+    expectSetCompositionTypeCall(Hwc2::IComposerClient::Composition::DEVICE);
+    EXPECT_CALL(*mLayerFE, hasRoundedCorners()).WillRepeatedly(Return(false));
+
+    mOutputLayer.writeStateToHWC(/*includeGeometry*/ true, /*skipLayer*/ true, 0,
                                  /*zIsOverridden*/ false, /*isPeekingThrough*/ false);
 }
 

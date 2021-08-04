@@ -59,11 +59,12 @@ public:
                         const std::shared_ptr<ExternalTexture>& buffer,
                         const bool useFramebufferCache, base::unique_fd&& bufferFence,
                         base::unique_fd* drawFence) override;
-    void cleanFramebufferCache() override {}
+    void cleanupPostRender() override;
+    void cleanFramebufferCache() override{};
     int getContextPriority() override;
     bool isProtected() const override { return mInProtectedContext; }
     bool supportsProtectedContent() const override;
-    bool useProtectedContext(bool useProtectedContext) override;
+    void useProtectedContext(bool useProtectedContext) override;
     bool supportsBackgroundBlur() override { return mBlurFilter != nullptr; }
     void assertShadersCompiled(int numShaders) override;
     void onPrimaryDisplaySizeChanged(ui::Size size) override;
@@ -75,6 +76,7 @@ protected:
     size_t getMaxViewportDims() const override;
     void mapExternalTextureBuffer(const sp<GraphicBuffer>& buffer, bool isRenderable) override;
     void unmapExternalTextureBuffer(const sp<GraphicBuffer>& buffer) override;
+    bool canSkipPostRenderCleanup() const override;
 
 private:
     static EGLConfig chooseEglConfig(EGLDisplay display, int format, bool logConfig);
@@ -126,19 +128,18 @@ private:
     // Number of external holders of ExternalTexture references, per GraphicBuffer ID.
     std::unordered_map<GraphicBufferId, int32_t> mGraphicBufferExternalRefs
             GUARDED_BY(mRenderingMutex);
-    // Cache of GL textures that we'll store per GraphicBuffer ID, sliced by GPU context.
+    // Cache of GL textures that we'll store per GraphicBuffer ID, shared between GPU contexts.
     std::unordered_map<GraphicBufferId, std::shared_ptr<AutoBackendTexture::LocalRef>> mTextureCache
             GUARDED_BY(mRenderingMutex);
-    std::unordered_map<GraphicBufferId, std::shared_ptr<AutoBackendTexture::LocalRef>>
-            mProtectedTextureCache GUARDED_BY(mRenderingMutex);
     std::unordered_map<LinearEffect, sk_sp<SkRuntimeEffect>, LinearEffectHasher> mRuntimeEffects;
+    AutoBackendTexture::CleanupManager mTextureCleanupMgr GUARDED_BY(mRenderingMutex);
 
     StretchShaderFactory mStretchShaderFactory;
     // Mutex guarding rendering operations, so that:
     // 1. GL operations aren't interleaved, and
     // 2. Internal state related to rendering that is potentially modified by
     // multiple threads is guaranteed thread-safe.
-    std::mutex mRenderingMutex;
+    mutable std::mutex mRenderingMutex;
 
     sp<Fence> mLastDrawFence;
 

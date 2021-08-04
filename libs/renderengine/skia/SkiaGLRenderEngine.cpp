@@ -36,6 +36,7 @@
 #include <SkSurface.h>
 #include <android-base/stringprintf.h>
 #include <gl/GrGLInterface.h>
+#include <gui/TraceUtils.h>
 #include <sync/sync.h>
 #include <ui/BlurRegion.h>
 #include <ui/DebugUtils.h>
@@ -316,9 +317,11 @@ SkiaGLRenderEngine::SkiaGLRenderEngine(const RenderEngineCreationArgs& args, EGL
     GrContextOptions options;
     options.fDisableDriverCorrectnessWorkarounds = true;
     options.fDisableDistanceFieldPaths = true;
+    options.fReducedShaderVariations = true;
     options.fPersistentCache = &mSkSLCacheMonitor;
     mGrContext = GrDirectContext::MakeGL(glInterface, options);
-    if (useProtectedContext(true)) {
+    if (supportsProtectedContent()) {
+        useProtectedContext(true);
         mProtectedGrContext = GrDirectContext::MakeGL(glInterface, options);
         useProtectedContext(false);
     }
@@ -371,12 +374,10 @@ GrDirectContext* SkiaGLRenderEngine::getActiveGrContext() const {
     return mInProtectedContext ? mProtectedGrContext.get() : mGrContext.get();
 }
 
-bool SkiaGLRenderEngine::useProtectedContext(bool useProtectedContext) {
-    if (useProtectedContext == mInProtectedContext) {
-        return true;
-    }
-    if (useProtectedContext && !supportsProtectedContent()) {
-        return false;
+void SkiaGLRenderEngine::useProtectedContext(bool useProtectedContext) {
+    if (useProtectedContext == mInProtectedContext ||
+        (useProtectedContext && !supportsProtectedContent())) {
+        return;
     }
 
     // release any scratch resources before switching into a new mode
@@ -387,9 +388,8 @@ bool SkiaGLRenderEngine::useProtectedContext(bool useProtectedContext) {
     const EGLSurface surface =
             useProtectedContext ? mProtectedPlaceholderSurface : mPlaceholderSurface;
     const EGLContext context = useProtectedContext ? mProtectedEGLContext : mEGLContext;
-    const bool success = eglMakeCurrent(mEGLDisplay, surface, surface, context) == EGL_TRUE;
 
-    if (success) {
+    if (eglMakeCurrent(mEGLDisplay, surface, surface, context) == EGL_TRUE) {
         mInProtectedContext = useProtectedContext;
         // given that we are sharing the same thread between two GrContexts we need to
         // make sure that the thread state is reset when switching between the two.
@@ -397,7 +397,6 @@ bool SkiaGLRenderEngine::useProtectedContext(bool useProtectedContext) {
             getActiveGrContext()->resetContext();
         }
     }
-    return success;
 }
 
 base::unique_fd SkiaGLRenderEngine::flush() {
@@ -507,17 +506,18 @@ void SkiaGLRenderEngine::mapExternalTextureBuffer(const sp<GraphicBuffer>& buffe
         return;
     }
     // We currently don't attempt to map a buffer if the buffer contains protected content
-    // or we are using a protected context because GPU resources for protected buffers is
-    // much more limited.
+    // because GPU resources for protected buffers is much more limited.
     const bool isProtectedBuffer = buffer->getUsage() & GRALLOC_USAGE_PROTECTED;
-    if (isProtectedBuffer || mInProtectedContext) {
+    if (isProtectedBuffer) {
         return;
     }
     ATRACE_CALL();
 
-    // If we were to support caching protected buffers then we will need to switch the currently
-    // bound context if we are not already using the protected context (and subsequently switch
-    // back after the buffer is cached).
+    // If we were to support caching protected buffers then we will need to switch the
+    // currently bound context if we are not already using the protected context (and subsequently
+    // switch back after the buffer is cached).  However, for non-protected content we can bind
+    // the texture in either GL context because they are initialized with the same share_context
+    // which allows the texture state to be shared between them.
     auto grContext = getActiveGrContext();
     auto& cache = mTextureCache;
 
@@ -528,7 +528,7 @@ void SkiaGLRenderEngine::mapExternalTextureBuffer(const sp<GraphicBuffer>& buffe
         std::shared_ptr<AutoBackendTexture::LocalRef> imageTextureRef =
                 std::make_shared<AutoBackendTexture::LocalRef>(grContext,
                                                                buffer->toAHardwareBuffer(),
-                                                               isRenderable);
+                                                               isRenderable, mTextureCleanupMgr);
         cache.insert({buffer->getId(), imageTextureRef});
     }
 }
@@ -549,13 +549,52 @@ void SkiaGLRenderEngine::unmapExternalTextureBuffer(const sp<GraphicBuffer>& buf
 
         iter->second--;
 
+        // Swap contexts if needed prior to deleting this buffer
+        // See Issue 1 of
+        // https://www.khronos.org/registry/EGL/extensions/EXT/EGL_EXT_protected_content.txt: even
+        // when a protected context and an unprotected context are part of the same share group,
+        // protected surfaces may not be accessed by an unprotected context, implying that protected
+        // surfaces may only be freed when a protected context is active.
+        const bool inProtected = mInProtectedContext;
+        useProtectedContext(buffer->getUsage() & GRALLOC_USAGE_PROTECTED);
+
         if (iter->second == 0) {
             mTextureCache.erase(buffer->getId());
-            mProtectedTextureCache.erase(buffer->getId());
             mGraphicBufferExternalRefs.erase(buffer->getId());
+        }
+
+        // Swap back to the previous context so that cached values of isProtected in SurfaceFlinger
+        // are up-to-date.
+        if (inProtected != mInProtectedContext) {
+            useProtectedContext(inProtected);
         }
     }
 }
+
+bool SkiaGLRenderEngine::canSkipPostRenderCleanup() const {
+    std::lock_guard<std::mutex> lock(mRenderingMutex);
+    return mTextureCleanupMgr.isEmpty();
+}
+
+void SkiaGLRenderEngine::cleanupPostRender() {
+    ATRACE_CALL();
+    std::lock_guard<std::mutex> lock(mRenderingMutex);
+    mTextureCleanupMgr.cleanup();
+}
+
+// Helper class intended to be used on the stack to ensure that texture cleanup
+// is deferred until after this class goes out of scope.
+class DeferTextureCleanup final {
+public:
+    DeferTextureCleanup(AutoBackendTexture::CleanupManager& mgr) : mMgr(mgr) {
+        mMgr.setDeferredStatus(true);
+    }
+    ~DeferTextureCleanup() { mMgr.setDeferredStatus(false); }
+
+private:
+    DISALLOW_COPY_AND_ASSIGN(DeferTextureCleanup);
+    AutoBackendTexture::CleanupManager& mMgr;
+};
 
 sk_sp<SkShader> SkiaGLRenderEngine::createRuntimeEffectShader(
         sk_sp<SkShader> shader,
@@ -576,9 +615,9 @@ sk_sp<SkShader> SkiaGLRenderEngine::createRuntimeEffectShader(
 
     if (requiresLinearEffect) {
         const ui::Dataspace inputDataspace =
-                mUseColorManagement ? layer->sourceDataspace : ui::Dataspace::UNKNOWN;
+                mUseColorManagement ? layer->sourceDataspace : ui::Dataspace::V0_SRGB_LINEAR;
         const ui::Dataspace outputDataspace =
-                mUseColorManagement ? display.outputDataspace : ui::Dataspace::UNKNOWN;
+                mUseColorManagement ? display.outputDataspace : ui::Dataspace::V0_SRGB_LINEAR;
 
         LinearEffect effect = LinearEffect{.inputDataspace = inputDataspace,
                                            .outputDataspace = outputDataspace,
@@ -703,7 +742,10 @@ status_t SkiaGLRenderEngine::drawLayers(const DisplaySettings& display,
     validateOutputBufferUsage(buffer->getBuffer());
 
     auto grContext = getActiveGrContext();
-    auto& cache = mInProtectedContext ? mProtectedTextureCache : mTextureCache;
+    auto& cache = mTextureCache;
+
+    // any AutoBackendTexture deletions will now be deferred until cleanupPostRender is called
+    DeferTextureCleanup dtc(mTextureCleanupMgr);
 
     std::shared_ptr<AutoBackendTexture::LocalRef> surfaceTextureRef;
     if (const auto& it = cache.find(buffer->getBuffer()->getId()); it != cache.end()) {
@@ -713,11 +755,11 @@ status_t SkiaGLRenderEngine::drawLayers(const DisplaySettings& display,
                 std::make_shared<AutoBackendTexture::LocalRef>(grContext,
                                                                buffer->getBuffer()
                                                                        ->toAHardwareBuffer(),
-                                                               true);
+                                                               true, mTextureCleanupMgr);
     }
 
     const ui::Dataspace dstDataspace =
-            mUseColorManagement ? display.outputDataspace : ui::Dataspace::UNKNOWN;
+            mUseColorManagement ? display.outputDataspace : ui::Dataspace::V0_SRGB_LINEAR;
     sk_sp<SkSurface> dstSurface = surfaceTextureRef->getOrCreateSurface(dstDataspace, grContext);
 
     SkCanvas* dstCanvas = mCapture->tryCapture(dstSurface.get());
@@ -793,7 +835,7 @@ status_t SkiaGLRenderEngine::drawLayers(const DisplaySettings& display,
     }
 
     for (const auto& layer : layers) {
-        ATRACE_NAME("DrawLayer");
+        ATRACE_FORMAT("DrawLayer: %s", layer->name.c_str());
 
         if (kPrintLayerSettings) {
             std::stringstream ls;
@@ -969,7 +1011,7 @@ status_t SkiaGLRenderEngine::drawLayers(const DisplaySettings& display,
                 imageTextureRef = std::make_shared<
                         AutoBackendTexture::LocalRef>(grContext,
                                                       item.buffer->getBuffer()->toAHardwareBuffer(),
-                                                      false);
+                                                      false, mTextureCleanupMgr);
             }
 
             // isOpaque means we need to ignore the alpha in the image,
@@ -1368,10 +1410,12 @@ void SkiaGLRenderEngine::onPrimaryDisplaySizeChanged(ui::Size size) {
     getActiveGrContext()->setResourceCacheLimit(maxResourceBytes);
 
     // if it is possible to switch contexts then we will resize the other context
-    if (useProtectedContext(!mInProtectedContext)) {
+    const bool originalProtectedState = mInProtectedContext;
+    useProtectedContext(!mInProtectedContext);
+    if (mInProtectedContext != originalProtectedState) {
         getActiveGrContext()->setResourceCacheLimit(maxResourceBytes);
         // reset back to the initial context that was active when this method was called
-        useProtectedContext(!mInProtectedContext);
+        useProtectedContext(originalProtectedState);
     }
 }
 
@@ -1446,12 +1490,6 @@ void SkiaGLRenderEngine::dump(std::string& result) {
         StringAppendF(&result, "Skia's Protected Wrapped Objects:\n");
         gpuProtectedReporter.logOutput(result, true);
 
-        StringAppendF(&result, "RenderEngine protected AHB/BackendTexture cache size: %zu\n",
-                      mProtectedTextureCache.size());
-        StringAppendF(&result, "Dumping buffer ids...\n");
-        for (const auto& [id, unused] : mProtectedTextureCache) {
-            StringAppendF(&result, "- 0x%" PRIx64 "\n", id);
-        }
         StringAppendF(&result, "\n");
         StringAppendF(&result, "RenderEngine runtime effects: %zu\n", mRuntimeEffects.size());
         for (const auto& [linearEffect, unused] : mRuntimeEffects) {

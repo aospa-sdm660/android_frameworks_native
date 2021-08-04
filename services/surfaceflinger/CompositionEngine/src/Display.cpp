@@ -59,32 +59,14 @@ std::shared_ptr<Display> createDisplay(
 Display::~Display() = default;
 
 void Display::setConfiguration(const compositionengine::DisplayCreationArgs& args) {
-    mIsVirtual = !args.physical;
+    mId = args.id;
+    mIsVirtual = !args.connectionType;
     mPowerAdvisor = args.powerAdvisor;
     editState().isSecure = args.isSecure;
     editState().displaySpace.bounds = Rect(args.pixels);
     setLayerStackFilter(args.layerStackId,
-                        args.physical &&
-                                args.physical->type == ui::DisplayConnectionType::Internal);
+                        args.connectionType == ui::DisplayConnectionType::Internal);
     setName(args.name);
-    mGpuVirtualDisplayIdGenerator = args.gpuVirtualDisplayIdGenerator;
-
-    if (args.physical) {
-        mId = args.physical->id;
-        mConnectionType = args.physical->type;
-    } else {
-        std::optional<DisplayId> id;
-        if (args.useHwcVirtualDisplays) {
-            id = maybeAllocateDisplayIdForVirtualDisplay(args.pixels, args.pixelFormat);
-        }
-        if (!id) {
-            id = mGpuVirtualDisplayIdGenerator->nextId();
-        }
-        LOG_ALWAYS_FATAL_IF(!id, "Failed to generate display ID");
-        mId = *id;
-        mConnectionType = ui::DisplayConnectionType::Internal;
-    }
-
 #ifdef QTI_DISPLAY_CONFIG_ENABLED
     int ret = ::DisplayConfig::ClientInterface::Create(args.name, nullptr, &mDisplayConfigIntf);
     if (ret) {
@@ -93,13 +75,8 @@ void Display::setConfiguration(const compositionengine::DisplayCreationArgs& arg
     }
 #endif
 
-}
-
-std::optional<DisplayId> Display::maybeAllocateDisplayIdForVirtualDisplay(
-        ui::Size pixels, ui::PixelFormat pixelFormat) const {
-    auto& hwc = getCompositionEngine().getHwComposer();
-    return hwc.allocateVirtualDisplay(static_cast<uint32_t>(pixels.width),
-                                      static_cast<uint32_t>(pixels.height), &pixelFormat);
+    mDisplayExtnIntf = args.displayExtnIntf;
+    ALOGI("Display::setConfiguration: mDisplayExtnIntf: %p", mDisplayExtnIntf);
 }
 
 bool Display::isValid() const {
@@ -122,23 +99,16 @@ std::optional<DisplayId> Display::getDisplayId() const {
     return mId;
 }
 
-void Display::setDisplayIdForTesting(DisplayId displayId) {
-    mId = displayId;
-}
-
 void Display::disconnect() {
     if (mIsDisconnected) {
         return;
     }
 
     mIsDisconnected = true;
-    if (const auto id = GpuVirtualDisplayId::tryCast(mId)) {
-        mGpuVirtualDisplayIdGenerator->markUnused(*id);
-        return;
+
+    if (const auto id = HalDisplayId::tryCast(mId)) {
+        getCompositionEngine().getHwComposer().disconnectDisplay(*id);
     }
-    const auto halDisplayId = HalDisplayId::tryCast(mId);
-    LOG_FATAL_IF(!halDisplayId);
-    getCompositionEngine().getHwComposer().disconnectDisplay(*halDisplayId);
 }
 
 void Display::setColorTransform(const compositionengine::CompositionRefreshArgs& args) {
@@ -301,9 +271,11 @@ void Display::chooseCompositionStrategy() {
         mHasScreenshot = hasScreenshot;
     }
 #endif
+    beginDraw();
     if (status_t result =
                 hwc.getDeviceCompositionChanges(*halDisplayId, anyLayersRequireClientComposition(),
-                                                getState().earliestPresentTime, &changes);
+                                                getState().earliestPresentTime,
+                                                getState().previousPresentFence, &changes);
         result != NO_ERROR) {
         ALOGE("chooseCompositionStrategy failed for %s: %d (%s)", getName().c_str(), result,
               strerror(-result));
@@ -320,6 +292,54 @@ void Display::chooseCompositionStrategy() {
     auto& state = editState();
     state.usesClientComposition = anyLayersRequireClientComposition();
     state.usesDeviceComposition = !allLayersRequireClientComposition();
+}
+
+void Display::beginDraw() {
+    ATRACE_CALL();
+    if (mDisplayExtnIntf == nullptr) {
+        return;
+    }
+    const auto physicalDisplayId = PhysicalDisplayId::tryCast(mId);
+    if (!physicalDisplayId.has_value() || mIsVirtual) {
+        return;
+    }
+#ifdef QTI_UNIFIED_DRAW
+    composer::FBTLayerInfo fbtLayerInfo;
+    composer::FBTSlotInfo current;
+    composer::FBTSlotInfo future;
+    std::vector<composer::LayerFlags> displayLayerFlags;
+    ui::Dataspace dataspace;
+    auto& hwc = getCompositionEngine().getHwComposer();
+    const auto hwcDisplayId = hwc.fromPhysicalDisplayId(*physicalDisplayId);
+    for (const auto& layer : getOutputLayersOrderedByZ()) {
+         composer::LayerFlags layerFlags;
+         auto layerCompositionState = layer->getLayerFE().getCompositionState();
+         layerFlags.secure_camera = layerCompositionState->isSecureCamera;
+         layerFlags.secure_ui     = layerCompositionState->isSecureDisplay;
+         layerFlags.secure_video  = layerCompositionState->hasProtectedContent;
+         displayLayerFlags.push_back(layerFlags);
+    }
+    fbtLayerInfo.width = getState().orientedDisplaySpace.bounds.width();
+    fbtLayerInfo.height = getState().orientedDisplaySpace.bounds.height();
+    auto renderSurface = getRenderSurface();
+    fbtLayerInfo.secure = renderSurface->isProtected();
+    fbtLayerInfo.dataspace = static_cast<int>(renderSurface->getClientTargetCurrentDataspace());
+    current.index = renderSurface->getClientTargetCurrentSlot();
+    dataspace = renderSurface->getClientTargetCurrentDataspace();
+
+    if (current.index < 0) {
+        return;
+    }
+    const auto id = HalDisplayId::tryCast(mId);
+    if (!mDisplayExtnIntf->BeginDraw(
+        static_cast<uint32_t>(*hwcDisplayId), displayLayerFlags, fbtLayerInfo,
+        current, future)) {
+        hwc.setClientTarget_3_1(*id, future.index, future.fence, dataspace);
+        ALOGV("Slot predicted %d", future.index);
+    } else {
+        ALOGV("Slot not predicted");
+    }
+#endif
 }
 
 bool Display::getSkipColorTransform() const {
@@ -389,8 +409,8 @@ void Display::applyClientTargetRequests(const ClientTargetProperty& clientTarget
     if (clientTargetProperty.dataspace == ui::Dataspace::UNKNOWN) {
         return;
     }
-    auto outputState = editState();
-    outputState.dataspace = clientTargetProperty.dataspace;
+
+    editState().dataspace = clientTargetProperty.dataspace;
     getRenderSurface()->setBufferDataspace(clientTargetProperty.dataspace);
     getRenderSurface()->setBufferPixelFormat(clientTargetProperty.pixelFormat);
 }
@@ -404,7 +424,8 @@ compositionengine::Output::FrameFences Display::presentAndGetFrameFences() {
     }
 
     auto& hwc = getCompositionEngine().getHwComposer();
-    hwc.presentAndGetReleaseFences(*halDisplayIdOpt, getState().earliestPresentTime);
+    hwc.presentAndGetReleaseFences(*halDisplayIdOpt, getState().earliestPresentTime,
+                                   getState().previousPresentFence);
 
     fences.presentFence = hwc.getPresentFence(*halDisplayIdOpt);
 

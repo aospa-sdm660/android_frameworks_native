@@ -1626,19 +1626,17 @@ void SensorService::onProximityActiveLocked(bool isActive) {
 }
 
 void SensorService::notifyProximityStateLocked(
-        const std::vector<sp<ProximityActiveListener>>& listnrs) {
-    std::async(
-        std::launch::async,
-        [](uint64_t mySeq, bool isActive, std::vector<sp<ProximityActiveListener>> listeners) {
-            while (completedCallbackSeq.load() != mySeq - 1)
-                std::this_thread::sleep_for(1ms);
-            for (auto& listener : listeners)
-                listener->onProximityActive(isActive);
-            completedCallbackSeq++;
-        },
-        ++curProxCallbackSeq, mProximityActiveCount > 0,
-        listnrs /* (this is meant to be a copy) */
-    );
+        const std::vector<sp<ProximityActiveListener>>& listeners) {
+    const bool isActive = mProximityActiveCount > 0;
+    const uint64_t mySeq = ++curProxCallbackSeq;
+    std::thread t([isActive, mySeq, listenersCopy = listeners]() {
+        while (completedCallbackSeq.load() != mySeq - 1)
+            std::this_thread::sleep_for(1ms);
+        for (auto& listener : listenersCopy)
+            listener->onProximityActive(isActive);
+        completedCallbackSeq++;
+    });
+    t.detach();
 }
 
 status_t SensorService::addProximityActiveListener(const sp<ProximityActiveListener>& callback) {
@@ -2163,8 +2161,9 @@ bool SensorService::isUidActive(uid_t uid) {
 
 bool SensorService::isRateCappedBasedOnPermission(const String16& opPackageName) {
     int targetSdk = getTargetSdkVersion(opPackageName);
-    bool hasSamplingRatePermission = PermissionCache::checkCallingPermission(
-                    sAccessHighSensorSamplingRatePermission);
+    bool hasSamplingRatePermission = checkPermission(sAccessHighSensorSamplingRatePermission,
+            IPCThreadState::self()->getCallingPid(),
+            IPCThreadState::self()->getCallingUid());
     if (targetSdk < __ANDROID_API_S__ ||
             (targetSdk >= __ANDROID_API_S__ && hasSamplingRatePermission)) {
         return false;
@@ -2172,6 +2171,13 @@ bool SensorService::isRateCappedBasedOnPermission(const String16& opPackageName)
     return true;
 }
 
+/**
+ * Checks if a sensor should be capped according to HIGH_SAMPLING_RATE_SENSORS
+ * permission.
+ *
+ * This needs to be kept in sync with the list defined on the Java side
+ * in frameworks/base/core/java/android/hardware/SystemSensorManager.java
+ */
 bool SensorService::isSensorInCappedSet(int sensorType) {
     return (sensorType == SENSOR_TYPE_ACCELEROMETER
             || sensorType == SENSOR_TYPE_ACCELEROMETER_UNCALIBRATED

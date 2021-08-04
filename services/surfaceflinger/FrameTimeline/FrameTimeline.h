@@ -96,7 +96,7 @@ struct JankClassificationThresholds {
     // The various thresholds for App and SF. If the actual timestamp falls within the threshold
     // compared to prediction, we treat it as on time.
     nsecs_t presentThreshold = std::chrono::duration_cast<std::chrono::nanoseconds>(2ms).count();
-    nsecs_t deadlineThreshold = std::chrono::duration_cast<std::chrono::nanoseconds>(2ms).count();
+    nsecs_t deadlineThreshold = std::chrono::duration_cast<std::chrono::nanoseconds>(0ms).count();
     nsecs_t startThreshold = std::chrono::duration_cast<std::chrono::nanoseconds>(2ms).count();
 };
 
@@ -154,7 +154,7 @@ public:
                  int32_t layerId, std::string layerName, std::string debugName,
                  PredictionState predictionState, TimelineItem&& predictions,
                  std::shared_ptr<TimeStats> timeStats, JankClassificationThresholds thresholds,
-                 TraceCookieCounter* traceCookieCounter, bool isBuffer);
+                 TraceCookieCounter* traceCookieCounter, bool isBuffer, int32_t gameMode);
     ~SurfaceFrame() = default;
 
     // Returns std::nullopt if the frame hasn't been classified yet.
@@ -259,6 +259,8 @@ private:
     // Tells if the SurfaceFrame is representing a buffer or a transaction without a
     // buffer(animations)
     bool mIsBuffer;
+    // GameMode from the layer. Used in metrics.
+    int32_t mGameMode = 0;
 };
 
 /*
@@ -278,7 +280,8 @@ public:
     // Debug name is the human-readable debugging string for dumpsys.
     virtual std::shared_ptr<SurfaceFrame> createSurfaceFrameForToken(
             const FrameTimelineInfo& frameTimelineInfo, pid_t ownerPid, uid_t ownerUid,
-            int32_t layerId, std::string layerName, std::string debugName, bool isBuffer) = 0;
+            int32_t layerId, std::string layerName, std::string debugName, bool isBuffer,
+            int32_t gameMode) = 0;
 
     // Adds a new SurfaceFrame to the current DisplayFrame. Frames from multiple layers can be
     // composited into one display frame.
@@ -437,7 +440,8 @@ public:
     frametimeline::TokenManager* getTokenManager() override { return &mTokenManager; }
     std::shared_ptr<SurfaceFrame> createSurfaceFrameForToken(
             const FrameTimelineInfo& frameTimelineInfo, pid_t ownerPid, uid_t ownerUid,
-            int32_t layerId, std::string layerName, std::string debugName, bool isBuffer) override;
+            int32_t layerId, std::string layerName, std::string debugName, bool isBuffer,
+            int32_t gameMode) override;
     void addSurfaceFrame(std::shared_ptr<frametimeline::SurfaceFrame> surfaceFrame) override;
     void setSfWakeUp(int64_t token, nsecs_t wakeupTime, Fps refreshRate) override;
     void setSfPresent(nsecs_t sfPresentTime, const std::shared_ptr<FenceTime>& presentFence,

@@ -80,21 +80,17 @@ public:
 
     // Internal
     virtual void setConfiguration(const compositionengine::DisplayCreationArgs&);
-    virtual std::optional<DisplayId> maybeAllocateDisplayIdForVirtualDisplay(ui::Size,
-                                                                             ui::PixelFormat) const;
     std::unique_ptr<compositionengine::OutputLayer> createOutputLayer(const sp<LayerFE>&) const;
-
-    // Testing
-    void setDisplayIdForTesting(DisplayId displayId);
 
 private:
     bool mIsVirtual = false;
     bool mIsDisconnected = false;
     DisplayId mId;
     Hwc2::PowerAdvisor* mPowerAdvisor = nullptr;
-    DisplayIdGenerator<GpuVirtualDisplayId>* mGpuVirtualDisplayIdGenerator;
     bool mHasScreenshot = false;
     ui::DisplayConnectionType mConnectionType = ui::DisplayConnectionType::Internal;
+    composer::DisplayExtnIntf *mDisplayExtnIntf = nullptr;
+    void beginDraw();
 };
 
 // This template factory function standardizes the implementation details of the

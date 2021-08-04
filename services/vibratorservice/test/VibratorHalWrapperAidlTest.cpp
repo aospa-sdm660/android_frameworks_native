@@ -189,8 +189,7 @@ TEST_F(VibratorHalWrapperAidlTest, TestOnWithoutCallbackSupport) {
                 .WillRepeatedly(vibrator::TriggerSchedulerCallback());
         EXPECT_CALL(*mMockHal.get(), on(Eq(11), _))
                 .Times(Exactly(1))
-                .WillRepeatedly(Return(
-                        Status::fromExceptionCode(Status::Exception::EX_UNSUPPORTED_OPERATION)));
+                .WillRepeatedly(Return(Status::fromStatusT(UNKNOWN_TRANSACTION)));
         EXPECT_CALL(*mMockHal.get(), on(Eq(12), _))
                 .Times(Exactly(1))
                 .WillRepeatedly(Return(Status::fromExceptionCode(Status::Exception::EX_SECURITY)));
@@ -228,8 +227,7 @@ TEST_F(VibratorHalWrapperAidlTest, TestSetAmplitude) {
         EXPECT_CALL(*mMockHal.get(), setAmplitude(Eq(0.1f))).Times(Exactly(1));
         EXPECT_CALL(*mMockHal.get(), setAmplitude(Eq(0.2f)))
                 .Times(Exactly(1))
-                .WillRepeatedly(Return(
-                        Status::fromExceptionCode(Status::Exception::EX_UNSUPPORTED_OPERATION)));
+                .WillRepeatedly(Return(Status::fromStatusT(UNKNOWN_TRANSACTION)));
         EXPECT_CALL(*mMockHal.get(), setAmplitude(Eq(0.5f)))
                 .Times(Exactly(1))
                 .WillRepeatedly(Return(Status::fromExceptionCode(Status::Exception::EX_SECURITY)));
@@ -265,8 +263,7 @@ TEST_F(VibratorHalWrapperAidlTest, TestAlwaysOnEnable) {
         EXPECT_CALL(*mMockHal.get(),
                     alwaysOnEnable(Eq(2), Eq(Effect::TICK), Eq(EffectStrength::MEDIUM)))
                 .Times(Exactly(1))
-                .WillRepeatedly(Return(
-                        Status::fromExceptionCode(Status::Exception::EX_UNSUPPORTED_OPERATION)));
+                .WillRepeatedly(Return(Status::fromStatusT(UNKNOWN_TRANSACTION)));
         EXPECT_CALL(*mMockHal.get(),
                     alwaysOnEnable(Eq(3), Eq(Effect::POP), Eq(EffectStrength::STRONG)))
                 .Times(Exactly(1))
@@ -304,6 +301,10 @@ TEST_F(VibratorHalWrapperAidlTest, TestGetInfoDoesNotCacheFailedResult) {
     constexpr float F0 = 123.f;
     constexpr float F_RESOLUTION = 0.5f;
     constexpr float Q_FACTOR = 123.f;
+    constexpr int32_t COMPOSITION_SIZE_MAX = 10;
+    constexpr int32_t PWLE_SIZE_MAX = 20;
+    constexpr int32_t PRIMITIVE_DELAY_MAX = 100;
+    constexpr int32_t PWLE_DURATION_MAX = 200;
     std::vector<Effect> supportedEffects = {Effect::CLICK, Effect::TICK};
     std::vector<CompositePrimitive> supportedPrimitives = {CompositePrimitive::CLICK};
     std::vector<Braking> supportedBraking = {Braking::CLAB};
@@ -334,6 +335,22 @@ TEST_F(VibratorHalWrapperAidlTest, TestGetInfoDoesNotCacheFailedResult) {
     EXPECT_CALL(*mMockHal.get(), getPrimitiveDuration(Eq(CompositePrimitive::CLICK), _))
             .Times(Exactly(1))
             .WillRepeatedly(DoAll(SetArgPointee<1>(10), Return(Status())));
+    EXPECT_CALL(*mMockHal.get(), getCompositionSizeMax(_))
+            .Times(Exactly(2))
+            .WillOnce(Return(Status::fromExceptionCode(Status::Exception::EX_SECURITY)))
+            .WillRepeatedly(DoAll(SetArgPointee<0>(COMPOSITION_SIZE_MAX), Return(Status())));
+    EXPECT_CALL(*mMockHal.get(), getCompositionDelayMax(_))
+            .Times(Exactly(2))
+            .WillOnce(Return(Status::fromExceptionCode(Status::Exception::EX_SECURITY)))
+            .WillRepeatedly(DoAll(SetArgPointee<0>(PRIMITIVE_DELAY_MAX), Return(Status())));
+    EXPECT_CALL(*mMockHal.get(), getPwlePrimitiveDurationMax(_))
+            .Times(Exactly(2))
+            .WillOnce(Return(Status::fromExceptionCode(Status::Exception::EX_SECURITY)))
+            .WillRepeatedly(DoAll(SetArgPointee<0>(PWLE_DURATION_MAX), Return(Status())));
+    EXPECT_CALL(*mMockHal.get(), getPwleCompositionSizeMax(_))
+            .Times(Exactly(2))
+            .WillOnce(Return(Status::fromExceptionCode(Status::Exception::EX_SECURITY)))
+            .WillRepeatedly(DoAll(SetArgPointee<0>(PWLE_SIZE_MAX), Return(Status())));
     EXPECT_CALL(*mMockHal.get(), getFrequencyMinimum(_))
             .Times(Exactly(2))
             .WillOnce(Return(Status::fromExceptionCode(Status::Exception::EX_SECURITY)))
@@ -361,6 +378,10 @@ TEST_F(VibratorHalWrapperAidlTest, TestGetInfoDoesNotCacheFailedResult) {
     ASSERT_TRUE(failed.supportedBraking.isFailed());
     ASSERT_TRUE(failed.supportedPrimitives.isFailed());
     ASSERT_TRUE(failed.primitiveDurations.isFailed());
+    ASSERT_TRUE(failed.primitiveDelayMax.isFailed());
+    ASSERT_TRUE(failed.pwlePrimitiveDurationMax.isFailed());
+    ASSERT_TRUE(failed.compositionSizeMax.isFailed());
+    ASSERT_TRUE(failed.pwleSizeMax.isFailed());
     ASSERT_TRUE(failed.minFrequency.isFailed());
     ASSERT_TRUE(failed.resonantFrequency.isFailed());
     ASSERT_TRUE(failed.frequencyResolution.isFailed());
@@ -373,6 +394,11 @@ TEST_F(VibratorHalWrapperAidlTest, TestGetInfoDoesNotCacheFailedResult) {
     ASSERT_EQ(supportedBraking, successful.supportedBraking.value());
     ASSERT_EQ(supportedPrimitives, successful.supportedPrimitives.value());
     ASSERT_EQ(primitiveDurations, successful.primitiveDurations.value());
+    ASSERT_EQ(std::chrono::milliseconds(PRIMITIVE_DELAY_MAX), successful.primitiveDelayMax.value());
+    ASSERT_EQ(std::chrono::milliseconds(PWLE_DURATION_MAX),
+              successful.pwlePrimitiveDurationMax.value());
+    ASSERT_EQ(COMPOSITION_SIZE_MAX, successful.compositionSizeMax.value());
+    ASSERT_EQ(PWLE_SIZE_MAX, successful.pwleSizeMax.value());
     ASSERT_EQ(F_MIN, successful.minFrequency.value());
     ASSERT_EQ(F0, successful.resonantFrequency.value());
     ASSERT_EQ(F_RESOLUTION, successful.frequencyResolution.value());
@@ -383,6 +409,10 @@ TEST_F(VibratorHalWrapperAidlTest, TestGetInfoDoesNotCacheFailedResult) {
 TEST_F(VibratorHalWrapperAidlTest, TestGetInfoCachesResult) {
     constexpr float F_MIN = 100.f;
     constexpr float F0 = 123.f;
+    constexpr int32_t COMPOSITION_SIZE_MAX = 10;
+    constexpr int32_t PWLE_SIZE_MAX = 20;
+    constexpr int32_t PRIMITIVE_DELAY_MAX = 100;
+    constexpr int32_t PWLE_DURATION_MAX = 200;
     std::vector<Effect> supportedEffects = {Effect::CLICK, Effect::TICK};
 
     EXPECT_CALL(*mMockHal.get(), getCapabilities(_))
@@ -397,8 +427,19 @@ TEST_F(VibratorHalWrapperAidlTest, TestGetInfoCachesResult) {
                     Return(Status::fromExceptionCode(Status::Exception::EX_UNSUPPORTED_OPERATION)));
     EXPECT_CALL(*mMockHal.get(), getSupportedPrimitives(_))
             .Times(Exactly(1))
-            .WillRepeatedly(
-                    Return(Status::fromExceptionCode(Status::Exception::EX_UNSUPPORTED_OPERATION)));
+            .WillRepeatedly(Return(Status::fromStatusT(UNKNOWN_TRANSACTION)));
+    EXPECT_CALL(*mMockHal.get(), getCompositionSizeMax(_))
+            .Times(Exactly(1))
+            .WillRepeatedly(DoAll(SetArgPointee<0>(COMPOSITION_SIZE_MAX), Return(Status())));
+    EXPECT_CALL(*mMockHal.get(), getCompositionDelayMax(_))
+            .Times(Exactly(1))
+            .WillRepeatedly(DoAll(SetArgPointee<0>(PRIMITIVE_DELAY_MAX), Return(Status())));
+    EXPECT_CALL(*mMockHal.get(), getPwlePrimitiveDurationMax(_))
+            .Times(Exactly(1))
+            .WillRepeatedly(DoAll(SetArgPointee<0>(PWLE_DURATION_MAX), Return(Status())));
+    EXPECT_CALL(*mMockHal.get(), getPwleCompositionSizeMax(_))
+            .Times(Exactly(1))
+            .WillRepeatedly(DoAll(SetArgPointee<0>(PWLE_SIZE_MAX), Return(Status())));
     EXPECT_CALL(*mMockHal.get(), getFrequencyMinimum(_))
             .Times(Exactly(1))
             .WillRepeatedly(DoAll(SetArgPointee<0>(F_MIN), Return(Status())));
@@ -411,8 +452,7 @@ TEST_F(VibratorHalWrapperAidlTest, TestGetInfoCachesResult) {
                     Return(Status::fromExceptionCode(Status::Exception::EX_UNSUPPORTED_OPERATION)));
     EXPECT_CALL(*mMockHal.get(), getBandwidthAmplitudeMap(_))
             .Times(Exactly(1))
-            .WillRepeatedly(
-                    Return(Status::fromExceptionCode(Status::Exception::EX_UNSUPPORTED_OPERATION)));
+            .WillRepeatedly(Return(Status::fromStatusT(UNKNOWN_TRANSACTION)));
     EXPECT_CALL(*mMockHal.get(), getSupportedBraking(_))
             .Times(Exactly(1))
             .WillRepeatedly(
@@ -431,6 +471,10 @@ TEST_F(VibratorHalWrapperAidlTest, TestGetInfoCachesResult) {
     ASSERT_TRUE(info.supportedBraking.isUnsupported());
     ASSERT_TRUE(info.supportedPrimitives.isUnsupported());
     ASSERT_TRUE(info.primitiveDurations.isUnsupported());
+    ASSERT_EQ(std::chrono::milliseconds(PRIMITIVE_DELAY_MAX), info.primitiveDelayMax.value());
+    ASSERT_EQ(std::chrono::milliseconds(PWLE_DURATION_MAX), info.pwlePrimitiveDurationMax.value());
+    ASSERT_EQ(COMPOSITION_SIZE_MAX, info.compositionSizeMax.value());
+    ASSERT_EQ(PWLE_SIZE_MAX, info.pwleSizeMax.value());
     ASSERT_EQ(F_MIN, info.minFrequency.value());
     ASSERT_EQ(F0, info.resonantFrequency.value());
     ASSERT_TRUE(info.frequencyResolution.isUnsupported());
@@ -451,8 +495,7 @@ TEST_F(VibratorHalWrapperAidlTest, TestPerformEffectWithCallbackSupport) {
                         DoAll(SetArgPointee<3>(1000), TriggerCallbackInArg2(), Return(Status())));
         EXPECT_CALL(*mMockHal.get(), perform(Eq(Effect::POP), Eq(EffectStrength::MEDIUM), _, _))
                 .Times(Exactly(1))
-                .WillRepeatedly(Return(
-                        Status::fromExceptionCode(Status::Exception::EX_UNSUPPORTED_OPERATION)));
+                .WillRepeatedly(Return(Status::fromStatusT(UNKNOWN_TRANSACTION)));
         EXPECT_CALL(*mMockHal.get(), perform(Eq(Effect::THUD), Eq(EffectStrength::STRONG), _, _))
                 .Times(Exactly(1))
                 .WillRepeatedly(Return(Status::fromExceptionCode(Status::Exception::EX_SECURITY)));
@@ -549,8 +592,7 @@ TEST_F(VibratorHalWrapperAidlTest, TestPerformComposedEffect) {
                 .WillRepeatedly(DoAll(TriggerCallbackInArg1(), Return(Status())));
         EXPECT_CALL(*mMockHal.get(), compose(Eq(singleEffect), _))
                 .Times(Exactly(1))
-                .WillRepeatedly(Return(
-                        Status::fromExceptionCode(Status::Exception::EX_UNSUPPORTED_OPERATION)));
+                .WillRepeatedly(Return(Status::fromStatusT(UNKNOWN_TRANSACTION)));
         EXPECT_CALL(*mMockHal.get(), compose(Eq(multipleEffects), _))
                 .Times(Exactly(1))
                 .WillRepeatedly(Return(Status::fromExceptionCode(Status::Exception::EX_SECURITY)));
