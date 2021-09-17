@@ -257,20 +257,6 @@ void Display::chooseCompositionStrategy() {
     std::optional<android::HWComposer::DeviceRequestedChanges> changes;
     auto& hwc = getCompositionEngine().getHwComposer();
 
-#ifdef QTI_DISPLAY_CONFIG_ENABLED
-    auto layers = getOutputLayersOrderedByZ();
-    bool hasScreenshot = std::any_of(layers.begin(), layers.end(), [](auto* layer) {
-         return layer->getLayerFE().getCompositionState()->isScreenshot;
-    });
-    const auto physicalDisplayId = PhysicalDisplayId::tryCast(mId);
-    if (physicalDisplayId.has_value() &&
-        (mConnectionType == ui::DisplayConnectionType::External) &&
-        (hasScreenshot != mHasScreenshot) && mDisplayConfigIntf) {
-        const auto hwcDisplayId = hwc.fromPhysicalDisplayId(*physicalDisplayId);
-        mDisplayConfigIntf->SetDisplayAnimating(*hwcDisplayId, hasScreenshot);
-        mHasScreenshot = hasScreenshot;
-    }
-#endif
     beginDraw();
     if (status_t result =
                 hwc.getDeviceCompositionChanges(*halDisplayId, anyLayersRequireClientComposition(),
@@ -423,6 +409,8 @@ compositionengine::Output::FrameFences Display::presentAndGetFrameFences() {
         return fences;
     }
 
+    endDraw();
+
     auto& hwc = getCompositionEngine().getHwComposer();
     hwc.presentAndGetReleaseFences(*halDisplayIdOpt, getState().earliestPresentTime,
                                    getState().previousPresentFence);
@@ -464,6 +452,41 @@ void Display::finishFrame(const compositionengine::CompositionRefreshArgs& refre
     }
 
     impl::Output::finishFrame(refreshArgs);
+}
+
+void Display::endDraw() {
+#ifdef QTI_UNIFIED_DRAW
+  ATRACE_CALL();
+  auto& outputState = editState();
+  if (!outputState.usesClientComposition || isVirtual()) {
+      return;
+  }
+
+  auto displayId = getDisplayId();
+  if (!displayId.has_value()) {
+      return;
+  }
+
+  auto const physicalDisplayId = PhysicalDisplayId::tryCast(*displayId);
+  if (!physicalDisplayId) {
+      return;
+  }
+
+  auto& hwc = getCompositionEngine().getHwComposer();
+  auto const halDisplayId = hwc.fromPhysicalDisplayId(*physicalDisplayId);
+  if (!halDisplayId.has_value()) {
+      return;
+  }
+
+  composer::FBTSlotInfo info;
+  auto renderSurface = getRenderSurface();
+  info.index = renderSurface->getClientTargetCurrentSlot();
+  info.fence = renderSurface->getClientTargetAcquireFence();
+  uint32_t hwcDisplayId = static_cast<uint32_t>(*halDisplayId);
+  if (mDisplayExtnIntf != nullptr) {
+      mDisplayExtnIntf->EndDraw(hwcDisplayId, info);
+  }
+#endif
 }
 
 } // namespace android::compositionengine::impl
