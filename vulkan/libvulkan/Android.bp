@@ -38,6 +38,7 @@ cc_library_shared {
         ],
     },
     clang: true,
+    sdclang: false,
     sanitize: {
         misc_undefined: ["integer"],
     },
