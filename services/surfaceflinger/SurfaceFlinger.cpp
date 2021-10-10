@@ -2236,6 +2236,11 @@ void SurfaceFlinger::signalLayerUpdate() {
     mEventQueue->invalidate();
 }
 
+void SurfaceFlinger::signalImmedLayerUpdate() {
+    notifyDisplayUpdateImminent();
+    mEventQueue->invalidateImmed();
+}
+
 void SurfaceFlinger::signalRefresh() {
     mRefreshPending = true;
     mEventQueue->refresh();
@@ -2410,11 +2415,8 @@ void SurfaceFlinger::setVsyncEnabledInternal(bool enabled) {
 }
 
 SurfaceFlinger::FenceWithFenceTime SurfaceFlinger::previousFrameFence() {
-    const auto now = systemTime();
-    const auto vsyncPeriod = mScheduler->getDisplayStatInfo(now).vsyncPeriod;
-    const bool expectedPresentTimeIsTheNextVsync = mExpectedPresentTime - now <= vsyncPeriod;
-    return expectedPresentTimeIsTheNextVsync ? mPreviousPresentFences[0]
-                                             : mPreviousPresentFences[1];
+     return mVsyncModulator->getVsyncConfig().sfOffset >= 0 ? mPreviousPresentFences[0]
+                                                           : mPreviousPresentFences[1];
 }
 
 bool SurfaceFlinger::previousFramePending(int graceTimeMs) {
@@ -2476,6 +2478,16 @@ void SurfaceFlinger::updateFrameScheduler() NO_THREAD_SAFETY_ANALYSIS {
     }
 }
 
+void SurfaceFlinger::syncToDisplayHardware() NO_THREAD_SAFETY_ANALYSIS {
+    ATRACE_CALL();
+
+    if (mSmoMo) {
+        nsecs_t timestamp = 0;
+        bool needResync = mSmoMo->SyncToDisplay(previousFrameFence().fence, &timestamp);
+        ALOGV("needResync = %d, timestamp = %" PRId64, needResync, timestamp);
+    }
+}
+
 void SurfaceFlinger::onMessageReceived(int32_t what, int64_t vsyncId, nsecs_t expectedVSyncTime) {
     switch (what) {
         case MessageQueue::INVALIDATE: {
@@ -2516,6 +2528,7 @@ void SurfaceFlinger::onMessageInvalidate(int64_t vsyncId, nsecs_t expectedVSyncT
     const nsecs_t lastScheduledPresentTime = mScheduledPresentTime;
     mScheduledPresentTime = expectedVSyncTime;
     updateFrameScheduler();
+    syncToDisplayHardware();
 
     const auto vsyncIn = [&] {
         if (!ATRACE_ENABLED()) return 0.f;
@@ -4597,6 +4610,12 @@ bool SurfaceFlinger::transactionIsReadyToBeApplied(
                 ATRACE_NAME("hasPendingBuffer");
                 return false;
             }
+
+            if (mSmoMo) {
+                if (mSmoMo->FrameIsEarly(layer->getSequence(), desiredPresentTime)) {
+                    return false;
+                }
+            }
         }
     }
     return true;
@@ -4721,6 +4740,27 @@ status_t SurfaceFlinger::setTransactionState(
     // Check the pending state to make sure the transaction is synchronous.
     if (state.transactionCommittedSignal) {
         waitForSynchronousTransaction(*state.transactionCommittedSignal);
+    }
+
+    if (mSmoMo) {
+        state.traverseStatesWithBuffers([&](const layer_state_t& state) {
+            sp<Layer> layer = fromHandle(state.surface).promote();
+            if (layer != nullptr) {
+                smomo::SmomoBufferStats bufferStats;
+                const nsecs_t now = systemTime(SYSTEM_TIME_MONOTONIC);
+                bufferStats.id = layer->getSequence();
+                bufferStats.auto_timestamp = isAutoTimestamp;
+                bufferStats.timestamp = now;
+                bufferStats.dequeue_latency = 0;
+                bufferStats.key = desiredPresentTime;
+                mSmoMo->CollectLayerStats(bufferStats);
+
+                const DisplayStatInfo stats = mScheduler->getDisplayStatInfo(now);
+                if (mSmoMo->FrameIsLate(bufferStats.id, stats.vsyncTime)) {
+                    signalImmedLayerUpdate();
+                }
+            }
+        });
     }
 
     return NO_ERROR;
@@ -5734,29 +5774,14 @@ void SurfaceFlinger::setPowerMode(const sp<IBinder>& displayToken, int mode) {
     }
 
     ::DisplayConfig::PowerMode hwcMode = ::DisplayConfig::PowerMode::kOff;
-    switch (power_mode) {
-        case hal::PowerMode::ON: hwcMode = ::DisplayConfig::PowerMode::kOn; break;
-        case hal::PowerMode::DOZE: hwcMode = ::DisplayConfig::PowerMode::kDoze; break;
-        case hal::PowerMode::DOZE_SUSPEND:
-            hwcMode = ::DisplayConfig::PowerMode::kDozeSuspend; break;
-        default: hwcMode = ::DisplayConfig::PowerMode::kOff; break;
+    if (power_mode == hal::PowerMode::ON) {
+        hwcMode = ::DisplayConfig::PowerMode::kOn;
     }
 
     bool step_up = false;
-    if (currentDisplayPowerMode == hal::PowerMode::OFF) {
-        if (newDisplayPowerMode == hal::PowerMode::DOZE ||
-            newDisplayPowerMode == hal::PowerMode::ON) {
-            step_up = true;
-        }
-    } else if (currentDisplayPowerMode == hal::PowerMode::DOZE_SUSPEND) {
-        if (newDisplayPowerMode == hal::PowerMode::DOZE ||
-            newDisplayPowerMode == hal::PowerMode::ON) {
-            step_up = true;
-        }
-    } else if (currentDisplayPowerMode == hal::PowerMode::DOZE) {
-        if (newDisplayPowerMode == hal::PowerMode::ON) {
-            step_up = true;
-        }
+    if (currentDisplayPowerMode == hal::PowerMode::OFF &&
+        newDisplayPowerMode == hal::PowerMode::ON) {
+        step_up = true;
     }
     // Change hardware state first while stepping up.
     if (step_up) {
@@ -6619,7 +6644,7 @@ status_t SurfaceFlinger::CheckTransactCodeCredentials(uint32_t code) {
             IPCThreadState* ipc = IPCThreadState::self();
             const int pid = ipc->getCallingPid();
             const int uid = ipc->getCallingUid();
-            if ((uid != AID_GRAPHICS) &&
+            if ((uid != AID_GRAPHICS) && (uid != AID_SYSTEM) &&
                 !PermissionCache::checkPermission(sControlDisplayBrightness, pid, uid)) {
                 ALOGE("Permission Denial: can't control brightness pid=%d, uid=%d", pid, uid);
                 return PERMISSION_DENIED;
@@ -8615,6 +8640,7 @@ void SurfaceFlinger::notifyAllDisplaysUpdateImminent() {
         ATRACE_CALL();
         // Notify Display Extn for GPU and Display Early Wakeup
         mDisplayExtnIntf->NotifyEarlyWakeUp(true, true);
+        setTransactionFlags(eDisplayTransactionNeeded, TransactionSchedule::EarlyEnd);
     }
 #endif
 }
@@ -8647,6 +8673,7 @@ void SurfaceFlinger::notifyDisplayUpdateImminent() {
             // Notify Display Extn for GPU and Display Early Wakeup
             mDisplayExtnIntf->NotifyEarlyWakeUp(true, true);
         }
+        setTransactionFlags(eDisplayTransactionNeeded, TransactionSchedule::EarlyEnd);
     }
 #endif
 }
