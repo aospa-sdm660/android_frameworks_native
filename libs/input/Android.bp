@@ -36,6 +36,8 @@ filegroup {
 
 cc_library {
     name: "libinput",
+    double_loadable: true,
+    vendor_available: true,
     host_supported: true,
     cflags: [
         "-Wall",
